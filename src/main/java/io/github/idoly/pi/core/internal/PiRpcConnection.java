@@ -137,13 +137,13 @@ final class PiRpcConnection implements AutoCloseable {
         }
     }
 
-    private void onExit(PiProcessExit processExit, Throwable failure) {
+    private void onExit(Integer exitCode, Throwable failure) {
         if (failure != null) {
             failPending(failure);
             inbound.fail(failure);
         } else if (!closed.get()) {
             PiProcessExitException exitFailure =
-                    new PiProcessExitException(processExit.exitCode());
+                    new PiProcessExitException(exitCode);
             failPending(exitFailure);
             inbound.fail(exitFailure);
         }

@@ -7,7 +7,7 @@ import java.lang.annotation.Target;
 
 /** Describes a Tool method parameter or record component for JSON Schema generation. */
 @Retention(RetentionPolicy.RUNTIME)
-@Target({ElementType.PARAMETER, ElementType.RECORD_COMPONENT, ElementType.FIELD})
+@Target({ElementType.PARAMETER, ElementType.RECORD_COMPONENT})
 public @interface PiToolParameter {
     /** Returns the JSON property name, or an empty string to use Java parameter metadata. */
     String name() default "";

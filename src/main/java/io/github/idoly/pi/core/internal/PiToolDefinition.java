@@ -131,7 +131,7 @@ final class PiToolDefinition {
     }
 
     ObjectNode schema() {
-        return schema.deepCopy();
+        return schema;
     }
 
     JsonNode invoke(JsonNode arguments, ObjectMapper mapper) throws Exception {

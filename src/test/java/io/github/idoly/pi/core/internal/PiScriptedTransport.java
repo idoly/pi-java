@@ -13,7 +13,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 final class PiScriptedTransport implements PiTransport {
     private final SubmissionPublisher<Object> inbound = new SubmissionPublisher<>();
     private final BlockingQueue<PiCommand> outbound = new LinkedBlockingQueue<>();
-    private final CompletableFuture<PiProcessExit> exit = new CompletableFuture<>();
+    private final CompletableFuture<Integer> exit = new CompletableFuture<>();
     private final AtomicBoolean running = new AtomicBoolean();
 
     @Override
@@ -37,7 +37,7 @@ final class PiScriptedTransport implements PiTransport {
     }
 
     @Override
-    public CompletionStage<PiProcessExit> exit() {
+    public CompletionStage<Integer> exit() {
         return exit;
     }
 
@@ -62,14 +62,14 @@ final class PiScriptedTransport implements PiTransport {
     void exitProcess(int exitCode) {
         running.set(false);
         inbound.close();
-        exit.complete(new PiProcessExit(exitCode));
+        exit.complete(exitCode);
     }
 
     @Override
     public void close() {
         if (running.getAndSet(false)) {
             inbound.close();
-            exit.complete(new PiProcessExit(0));
+            exit.complete(0);
         }
     }
 }

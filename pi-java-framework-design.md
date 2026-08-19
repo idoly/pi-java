@@ -1,219 +1,233 @@
-# pi-java 框架设计
+# pi-java 设计说明
 
-## 1. 定位
+本文只描述理解和维护当前实现所需的内部契约。
 
-`pi-java` 是以 Java 17 为编译与运行基线的 pi RPC SDK，CI 验证 JDK 17 和 25。每个 `PiClient` 独占一个工作区、一个 `pi --mode rpc` 子进程和一份可变 Session 状态。
-
-框架只负责：
-
-- 提供宿主 pi 的 Java RPC API
-- 使用 `ProcessBuilder` 启动和关闭 pi
-- 处理 stdin/stdout JSONL RPC
-- 将请求、响应、事件和一次 Agent activity 组织成 Java API
-- 生成安全、确定的启动参数
-- 将 `@PiTool` 方法桥接到 pi Extension
-
-框架不实现 Agent loop、模型 Provider、Node.js 运行时、进程池、远程 Gateway、Spring 集成或 Web UI。
-
-## 2. 发布边界
-
-Maven 坐标：
+## 1. 结构
 
 ```text
-io.github.idoly:pi-java:0.1.0-SNAPSHOT
-```
-
-项目只发布一个普通库 JAR，内部按 package 分层：
-
-```text
-io.github.idoly.pi.core            Client、Activity、Prompt、Result 和异常
-io.github.idoly.pi.core.tool       @PiTool 公开注解与注册异常
-io.github.idoly.pi.protocol        Event、Image 和 Response
-io.github.idoly.pi.core.internal   Process、RPC、JSONL、publisher、threading 和 Tool bridge
-```
-
-运行时仅依赖 Jackson Databind。核心不依赖 Spring、Reactor、Netty 或 Gson。普通 JAR 保持标准依赖边界，不内嵌依赖且没有 `Main-Class`。发布同时附带 sources、javadoc 和 Apache-2.0 许可证。`PiCliExample` 只存在于 test source，参与编译和测试但不进入发布 artifact。
-
-## 3. 总体架构
-
-```text
-Java Application
+Java application
     |
     v
-PiClient / PiActivity
+PiClient
     |
-    +-- RPC connection (internal)
-    +-- pi process + JSONL (internal)
-    +-- Activity state (internal)
-    +-- shared worker + scheduler (internal)
-    +-- generated @PiTool Extension (internal)
+    +-- PiRpcConnection
+    |       |
+    |       +-- PiTransport
+    |               |
+    |               +-- PiProcess
+    |
+    +-- PiActivity
+    |
+    +-- optional PiToolBridge
 ```
 
-一个 Client 不得被多个工作区共享。需要并发工作区时，由应用分别创建 Client。命令行、服务端或编排层都由应用基于同一公开 API 实现；仓库中的 `PiCliExample` 仅演示这种集成。
+每个 `PiClient` 独占：
 
-## 4. RPC 与 Transport
+- 一个 workspace
+- 一个 pi OS 进程
+- 一条 stdin/stdout JSONL 连接
+- 当前 Session
+- 至多一个 active Activity
+- 可选的 Java Tool bridge
 
-### 4.1 Framing
-
-stdin 和 stdout 使用 UTF-8 JSONL：
-
-- 写入固定使用 LF
-- 读取兼容 LF 和 CRLF
-- 每行只包含一个 JSON 对象
-- 默认单行上限 16 MiB
-- EOF 时处理最后一个未带 LF 的完整行
-- stdout 只解析协议，stderr 独立消费并写入 DEBUG 级别 `System.Logger`
-
-### 4.2 并发
-
-- 每个进程使用一个 writer task 串行写 stdin
-- stdout、stderr 使用独立 task 读取，避免子进程阻塞
-- request ID 关联并发响应
-- command queue 和 subscriber queue 有界
-- 进程退出会失败所有未完成请求
-- 所有 Client、Connection、Process 和 Tool callback 共享一个 worker executor
-- 所有 RPC 和 Activity timeout 共享一个 scheduler
-- JDK 21+ 的 worker 自动使用 virtual-thread-per-task executor，适合大量 Client
-- JDK 17 回退到共享且无界的 daemon cached thread pool，只用于并发受控的兼容运行
-- 关闭单个 Client 不关闭共享 worker 或 scheduler
-- 并发 Client 的主要上限是 Node/pi 进程内存、操作系统进程数和文件句柄
-
-### 4.3 前向兼容
-
-所有事件统一表示为 `PiEvent(type, raw)`；`textDelta()` 仅提供流式文本便利访问。新增事件无需更新枚举或 subtype，原始 `JsonNode` 始终保留。
-
-## 5. Client 与 Activity
-
-入口同步完成进程启动和 `get_state` readiness 检查：
-
-```java
-PiClient client = PiClient.open(workspace);
-```
-
-`PiClient` 只提供 `prompt`、通用 `request`、状态和全局事件流。`steer`、`followUp`、`abort` 属于当前 `PiActivity`；其他 RPC 命令通过 `request(command, arguments)` 调用，避免为上游每个命令维护 Java DTO。
-
-一次 `prompt` 返回 `PiActivity`。Activity 分离两个阶段：
-
-- `accepted()`：pi 接受 RPC 命令
-- `completion()`：收到 `agent_settled`，本次 activity 完成
-
-早于订阅发生的 Activity 事件会在首个订阅者连接时回放。最终文本以 `message_end` 为准，流式 delta 只用于增量观察。
-
-同一 Client 只允许一个 active Activity。通用 `request` 拒绝 activity command，防止绕过 Activity 状态机。
-
-`get_state` 返回 `sessionId` 和可选 `sessionFile`。`sessionId` 用于标识，pi `0.84.2` 的 `switch_session` 只接受文件路径；跨 Client 或 JVM 重启复用 Session 时保存并传递 `sessionFile`。`PiCliExample` 展示了 `--session` 和 `:switch` 的一种封装。
-
-## 6. 启动与资源
-
-内部 `PiProcessSpec` 对 workspace 执行 `toRealPath()`，并使用参数列表构建 argv。Windows 通过系统 `cmd.exe` 调用 npm 的 `pi.cmd` shim。
-
-启动参数固定包含：
+## 2. 包
 
 ```text
+io.github.idoly.pi.core
+    公开 Client、Activity、Prompt、Result、状态和异常
+
+io.github.idoly.pi.core.tool
+    @PiTool、@PiToolParameter 和注册异常
+
+io.github.idoly.pi.protocol
+    PiEvent、PiResponse 和 PiImage
+
+io.github.idoly.pi.core.internal
+    Process、RPC、JSONL、publisher、threading 和 Tool bridge
+```
+
+`core.internal` 不属于公开扩展点。
+
+## 3. 启动
+
+入口是：
+
+```java
+PiClient.open(Path workspace, Object... toolInstances)
+```
+
+`PiClientFactory` 按以下顺序启动：
+
+1. 验证 workspace。
+2. 如果传入 Tool 实例，创建 `PiToolBridge`。
+3. 由 `PiProcessConfig.create(...)` 生成命令、环境和 transport limits。
+4. 创建 `PiProcess` 和 `PiRpcConnection`。
+5. 启动进程及 I/O task。
+6. 执行 `get_state` readiness 请求。
+7. 返回 `IDLE` Client。
+
+失败时关闭已创建的 Client、进程、callback server 和临时文件。
+
+## 4. 进程与 JSONL
+
+启动命令：
+
+```text
+pi
+--mode rpc
 --no-approve
 --no-context-files
 --no-extensions
 --no-skills
 --no-prompt-templates
 --no-themes
+[--extension <generated-tool-extension>]
 ```
 
-框架继承宿主环境，直接使用 `PATH` 中的 `node` 和 `pi`。框架设置 `PI_SKIP_VERSION_CHECK=1`，不传 `--provider`、`--model`、`--session-dir` 或 `PI_CODING_AGENT_DIR`，由 pi 使用宿主环境和默认 `~/.pi/agent` 中的认证、settings 与 Session 存储规则。不提供 `--approve`、项目资源、显式文件资源、classpath 资源或资源注解。这样 `.pi/settings.json`、项目 packages、项目 system prompts、context files、Skills 和项目 Extension 都不能改变 Java RPC 配置。唯一显式加载的 Extension 是框架内部生成的 `@PiTool` adapter；pi 源码确认 `--no-extensions` 不影响 CLI `--extension` 路径。
+Windows 使用 `cmd.exe /d /s /c pi` 解析 `pi.cmd`，其他系统直接执行 `pi`。框架继承宿主环境，并设置 `PI_SKIP_VERSION_CHECK=1`。
 
-## 7. Java Tool
+`PiProcess` 运行三个 I/O task：
 
-### 7.1 API
+- 单 writer：串行写 stdin，固定使用 LF。
+- stdout reader：读取 UTF-8 JSONL 并发布协议消息。
+- stderr reader：消费 stderr，避免子进程 pipe 阻塞。
 
-```java
-@PiTool(name = "query_build", description = "Query a build")
-public Build query(
-        @PiToolParameter(name = "id") String id
-) {
-    return service.query(id);
-}
+`PiJsonlFramer` 按字节处理 frame：
+
+- 兼容 LF 和 CRLF。
+- 支持 EOF 前没有换行符的最后一行。
+- 在累计过程中执行 16 MiB 上限，避免无界分配。
+
+`PiJsonCodec` 使用 Jackson 编解码结构化 JSON。未知 event 保留为带完整 raw JSON 的 `PiEvent`。
+
+## 5. RPC
+
+`PiRpcConnection` 负责：
+
+- 生成 `pj-<prefix>-<sequence>` request ID。
+- 在并发 map 中保存 pending request。
+- 按 request ID 和 command type 匹配 response。
+- 将 unsuccessful response 转为 `PiRequestRejectedException`。
+- 在 15 秒后以 `PiRequestTimeoutException` 失败 request。
+- 在 transport close 或进程退出时失败所有 pending request。
+
+`PiTransport` 只有一个生产实现 `PiProcess`。保留该接口是为了让 RPC 和 Activity 测试使用 `PiScriptedTransport`，不需要启动 OS 进程。
+
+## 6. Activity
+
+`PiClientImpl` 同时维护 Client 状态和当前 Activity，避免两个状态机分离。
+
+```text
+STARTING -> IDLE -> ACTIVE -> IDLE
+                  -> FAILED
+IDLE/ACTIVE/FAILED -> STOPPING -> TERMINATED
 ```
 
-通过 `PiClient.open(workspace, instance)` 注册。示例 CLI 不注册默认 Java Tool，避免改变宿主 pi 的工具集；业务 Tool 只由嵌入 Java API 的应用显式传入。
+一次 Activity 的完成条件是：
 
-### 7.2 桥接
+```text
+prompt response accepted
+    +
+agent_settled received
+```
 
-框架在 pi 启动前：
+`agent_end` 不是完成边界。
 
-1. 扫描公开、非 static 的 `@PiTool` 方法。
-2. 检查重复名称和不支持的签名。
-3. 生成 JSON Schema。
-4. 在 `127.0.0.1` 随机端口启动 callback server。
-5. 为每个 Client 生成独立 256-bit Token。
-6. 生成调用 `pi.registerTool()` 的临时 TypeScript Extension。
-7. 通过 `--extension` 加载；pi 自动启用该 Extension 注册的 Tool。
+Activity 会：
 
-Client 关闭时停止 callback server、撤销 Token 并删除临时文件。使用者无需部署 Gateway。
+- 收集属于当前 Agent activity 的事件。
+- 从 `message_end` 保存完整 message。
+- 提取最终 assistant text。
+- 在缺少最终文本时回退到累计 text delta。
+- 在 timeout 时请求 abort，并将 Client 置为 `FAILED`。
 
-### 7.3 类型边界
+`PiBufferedPublisher` 缓存首次订阅前到达的 Activity 事件，避免 `prompt()` 返回与订阅之间丢事件。
 
-支持：
+## 7. Publisher
 
-- String、char、boolean、整数和浮点数
-- enum
-- 数组和 Collection
-- `Map<String, V>`
-- record
-- 嵌套 record
+`PiPublisher` 是有界的多订阅者 `Flow.Publisher`。每个订阅者拥有独立 queue 和 demand。
 
-暂不支持：
+它不使用 `SubmissionPublisher.submit()`，因为慢订阅者可能阻塞 stdout reader；也不静默丢弃事件。单个订阅者超过容量时，只失败该订阅者。
 
-- `CompletionStage` Tool 返回值
-- Optional
-- wildcard 和 type variable
-- 普通 Bean 和参数化 DTO
-- 多态或递归对象
-- Bean Validation 和 Jackson property 注解
-- Tool 取消及流式进度
+`PiBufferedPublisher` 只增加首次订阅前的 replay，实时分发仍复用 `PiPublisher`。
 
-顶层 `required=false` 参数必须使用引用类型。Tool 对象可能被并发调用，线程安全由业务代码保证。
+## 8. Java Tool
 
-### 7.4 安全
+`PiToolDefinition` 负责：
 
-- callback 只监听 loopback
-- callback 请求最大 1 MiB
-- Token 使用常量时间比较
-- 未知参数和缺失必填参数返回 400
-- 未授权请求返回 401
-- Java 业务异常返回脱敏的 500
-- stack trace 不进入 Tool result
+- 扫描和验证 `@PiTool` 方法。
+- 生成 JSON Schema。
+- 保存 Java `Type` 参数绑定。
+- 使用 Jackson 转换参数和返回值。
+- 调用目标方法。
 
-loopback 和 Token 只完成进程间身份确认。业务方法仍需执行用户授权、参数校验和写操作幂等。
+`PiToolBridge` 负责：
 
-## 8. 生命周期
+- 启动 JDK `HttpServer` loopback callback。
+- 生成每 Client 随机 Token。
+- 生成临时 TypeScript Extension。
+- 将 pi Tool call 转发到 `PiToolDefinition`。
+- 关闭 server 并删除临时文件。
 
-`PiClient.close()`：
+Schema 支持 primitive/wrapper、String、enum、array、collection、String-keyed map 和 record。普通 Bean 和递归参数类型会在 Client 启动阶段被拒绝。
 
-1. 失败 active Activity。
-2. 关闭 RPC transport。
-3. 终止 pi 进程，超时后强制结束。
-4. 取消 writer、stdout 和 stderr task。
-5. 关闭 Tool callback 并删除临时 Extension。
-6. 完成 Client 和 Activity publisher。
-7. 将状态置为 TERMINATED。
+临时 Extension 使用 TypeBox `Unsafe(schema)`，避免在 TypeScript 端再次实现 Schema 生成逻辑。
 
-共享 worker executor 和 timeout scheduler 属于进程级设施，不随单个 Client 关闭。JDK 17 回退线程均为 daemon；JDK 21+ worker 为虚拟线程。宿主应用负责在自身 shutdown 流程中关闭 Client；`PiCliExample` 展示了 shutdown hook 的一种实现。
+`AbortSignal` 可以取消 callback HTTP 请求，但不会强制停止已经进入的同步 Java 方法。
 
-启动失败也执行相同资源回收。进程异常退出会拒绝 pending request、失败 active Activity，并保留明确异常类型。
+## 9. 线程
 
-## 9. 测试与兼容
+`PiThreads` 为所有 Client 提供共享设施：
 
-测试分层：
+- JDK 21+：virtual-thread-per-task executor。
+- JDK 17：daemon cached thread pool。
+- timeout：有界 scheduled thread pool，大小为 `max(2, min(8, availableProcessors))`。
 
-- codec 和 JSONL framing 单元测试
-- scripted transport Client/Activity 测试
-- 真实 Java 子进程 transport 测试
-- Tool Schema、认证、调用和清理测试
-- JDK 17 fallback 与 JDK 21+ 虚拟线程选择测试
-- 50 个并发 scripted Client 生命周期测试
-- 示例 CLI Session 畸形 response 校验测试
-- 可选的真实 pi ProcessBuilder smoke test
-- 首次发布后由 japicmp 对指定旧版本执行公开 API 兼容检查
+反射调用 `Executors.newVirtualThreadPerTaskExecutor()` 是为了保持 Java 17 编译基线，同时在新 JDK 上使用虚拟线程。
 
-真实 pi 测试通过系统属性显式开启，普通构建不依赖本机 Node/pi 安装。Maven Compiler 固定 `--release 17`，Enforcer 拒绝 JDK 17 以下构建，GitHub Actions 使用 Temurin 17 和 25 执行完整验证。
+共享 executor 不随单个 Client 关闭。每个 Client 的 Node/pi 进程仍然是主要资源成本。
 
-当前实现以 pi `0.84.2` 运行验证，并与 `https://pi.dev/docs/latest/rpc` 及主分支 `rpc-types.ts`、`rpc-mode.ts`、`jsonl.ts` 对照。升级 pi 时先运行 RPC、Extension 加载和 Tool bridge 契约测试，再更新兼容版本说明。
+## 10. 关闭与失败
+
+`PiClient.close()` 是幂等的：
+
+1. 状态切换为 `STOPPING`。
+2. 失败 active Activity。
+3. 关闭 RPC connection 并失败 pending request。
+4. Transport 失败待写 command、取消 I/O task、关闭 stdin 并停止 pi。
+5. 关闭 Tool bridge。
+6. 完成 publisher。
+7. 状态切换为 `TERMINATED`。
+
+pi 进程有三秒正常退出时间，之后强制销毁。意外退出通过 `PiProcessExitException` 暴露 exit code。
+
+stderr 通过 `System.Logger` 的 `io.github.idoly.pi.process` logger 以 DEBUG 级别输出。
+
+## 11. 保留的内部抽象
+
+| 类型 | 保留理由 |
+|---|---|
+| `PiTransport` | 让 RPC/Activity 测试不依赖 OS 进程。 |
+| `PiProcessConfig` | 是 Process 的唯一配置输入，同时承载固定宿主启动规则。 |
+| `PiJsonlFramer` | 在分配前实施字节上限，`readLine()` 无法替代。 |
+| `PiPublisher` | 非阻塞、有界，并只失败慢订阅者。 |
+| `PiBufferedPublisher` | 解决 Activity 早期事件竞态。 |
+| `PiToolDefinition` | 隔离类型/Schema 逻辑与 HTTP IPC。 |
+| `PiToolBridge` | 承担 Node 到 JVM 的实际调用通道。 |
+| `PiThreads` | 集中 Java 17/21 线程选择和共享 scheduler。 |
+
+## 12. 测试
+
+普通测试覆盖：
+
+- JSONL chunk、CRLF、EOF 和大小上限
+- RPC correlation、reject、timeout 和进程退出
+- Activity acceptance、settled、replay、abort 和 timeout
+- 真实 Java 子进程 stdin/stdout/stderr
+- 固定 pi 启动参数
+- Publisher overflow
+- Java Tool Schema、鉴权、调用和错误清洗
+- 50 个并发 scripted Client
+- JDK 17 fallback 和 JDK 21+ 虚拟线程
+
+`PiToolRealPiSmokeTest` 默认关闭，用于验证真实 pi Extension 加载和 Java callback。当前验证的上游版本是 `@earendil-works/pi-coding-agent` `0.84.2`。

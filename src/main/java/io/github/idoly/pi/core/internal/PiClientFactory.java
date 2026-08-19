@@ -27,8 +27,8 @@ public final class PiClientFactory {
             if (toolInstances.length > 0) {
                 toolBridge = PiToolBridge.open(List.of(toolInstances));
             }
-            PiProcessSpec spec = PiProcessSpec.create(workspace, toolBridge);
-            PiTransport transport = new PiProcess(spec.config());
+            PiTransport transport = new PiProcess(
+                    PiProcessConfig.create(workspace, toolBridge));
             client = create(transport, REQUEST_TIMEOUT, newPrefix(), toolBridge);
             client.start().toCompletableFuture().join();
             client.request("get_state").toCompletableFuture().join();

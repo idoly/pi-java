@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 
@@ -23,7 +24,7 @@ class PiProcessTest {
                         PiTestProcess.class.getName()
                 ),
                 Path.of(System.getProperty("user.dir")),
-                null,
+                Map.of(),
                 8,
                 16,
                 1024 * 1024,

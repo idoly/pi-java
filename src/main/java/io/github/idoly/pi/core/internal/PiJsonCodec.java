@@ -37,13 +37,12 @@ final class PiJsonCodec {
         }
 
         String type = requiredText(root, "type");
-        JsonNode raw = root.deepCopy();
         return "response".equals(type)
-                ? decodeResponse(root, raw)
-                : new PiEvent(type, raw);
+                ? decodeResponse(root)
+                : new PiEvent(type, root);
     }
 
-    private static PiResponse decodeResponse(JsonNode root, JsonNode raw) {
+    private static PiResponse decodeResponse(JsonNode root) {
         JsonNode success = root.get("success");
         if (success == null || !success.isBoolean()) {
             throw new PiProtocolException("RPC response field 'success' must be boolean");
@@ -55,7 +54,7 @@ final class PiJsonCodec {
                 success.booleanValue(),
                 root.get("data"),
                 root.path("error").isTextual() ? root.path("error").textValue() : null,
-                raw
+                root
         );
     }
 

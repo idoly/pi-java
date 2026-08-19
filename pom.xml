@@ -69,26 +69,6 @@
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-enforcer-plugin</artifactId>
-                <version>3.5.0</version>
-                <executions>
-                    <execution>
-                        <id>enforce-java</id>
-                        <goals>
-                            <goal>enforce</goal>
-                        </goals>
-                        <configuration>
-                            <rules>
-                                <requireJavaVersion>
-                                    <version>[17,)</version>
-                                </requireJavaVersion>
-                            </rules>
-                        </configuration>
-                    </execution>
-                </executions>
-            </plugin>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
                 <version>3.14.0</version>
                 <configuration>
@@ -132,61 +112,4 @@
             </plugin>
         </plugins>
     </build>
-
-    <profiles>
-        <profile>
-            <id>api-compat</id>
-            <activation>
-                <property>
-                    <name>pi.compat.version</name>
-                </property>
-            </activation>
-            <build>
-                <plugins>
-                    <plugin>
-                        <groupId>com.github.siom79.japicmp</groupId>
-                        <artifactId>japicmp-maven-plugin</artifactId>
-                        <version>0.23.1</version>
-                        <executions>
-                            <execution>
-                                <id>check-api-compatibility</id>
-                                <phase>verify</phase>
-                                <goals>
-                                    <goal>cmp</goal>
-                                </goals>
-                            </execution>
-                        </executions>
-                        <configuration>
-                            <oldVersion>
-                                <dependency>
-                                    <groupId>${project.groupId}</groupId>
-                                    <artifactId>${project.artifactId}</artifactId>
-                                    <version>${pi.compat.version}</version>
-                                    <type>jar</type>
-                                </dependency>
-                            </oldVersion>
-                            <newVersion>
-                                <file>
-                                    <path>${project.build.directory}/${project.build.finalName}.jar</path>
-                                </file>
-                            </newVersion>
-                            <breakBuildOnBinaryIncompatibleModifications>true</breakBuildOnBinaryIncompatibleModifications>
-                            <breakBuildOnSourceIncompatibleModifications>true</breakBuildOnSourceIncompatibleModifications>
-                            <parameter>
-                                <accessModifier>public</accessModifier>
-                                <onlyModified>true</onlyModified>
-                                <includes>
-                                    <include>io.github.idoly.pi.core.*</include>
-                                    <include>io.github.idoly.pi.protocol.*</include>
-                                </includes>
-                                <excludes>
-                                    <exclude>io.github.idoly.pi.core.internal.*</exclude>
-                                </excludes>
-                            </parameter>
-                        </configuration>
-                    </plugin>
-                </plugins>
-            </build>
-        </profile>
-    </profiles>
 </project>

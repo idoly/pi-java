@@ -14,7 +14,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-class PiProcessSpecTest {
+class PiProcessConfigTest {
     @TempDir
     Path temp;
 
@@ -22,24 +22,24 @@ class PiProcessSpecTest {
     void buildsFixedCommandFromHostPiConfiguration() throws Exception {
         Path workspace = Files.createDirectory(temp.resolve("workspace"));
 
-        PiProcessSpec processSpec = PiProcessSpec.create(workspace);
+        PiProcessConfig config = PiProcessConfig.create(workspace, null);
 
-        assertTrue(processSpec.command().contains("pi"));
-        assertContainsSequence(processSpec.command(), "--mode", "rpc");
-        assertFalse(processSpec.command().contains("--tools"));
-        assertTrue(processSpec.command().containsAll(List.of(
+        assertTrue(config.command().contains("pi"));
+        assertContainsSequence(config.command(), "--mode", "rpc");
+        assertFalse(config.command().contains("--tools"));
+        assertTrue(config.command().containsAll(List.of(
                 "--no-approve", "--no-context-files", "--no-extensions",
                 "--no-skills", "--no-prompt-templates", "--no-themes")));
-        assertFalse(processSpec.command().contains("--provider"));
-        assertFalse(processSpec.command().contains("--model"));
-        assertFalse(processSpec.command().contains("--session-dir"));
-        assertEquals("1", processSpec.env().get("PI_SKIP_VERSION_CHECK"));
+        assertFalse(config.command().contains("--provider"));
+        assertFalse(config.command().contains("--model"));
+        assertFalse(config.command().contains("--session-dir"));
+        assertEquals("1", config.env().get("PI_SKIP_VERSION_CHECK"));
     }
 
     @Test
     void rejectsMissingWorkspace() {
         assertThrows(PiException.class,
-                () -> PiProcessSpec.create(temp.resolve("missing-workspace")));
+                () -> PiProcessConfig.create(temp.resolve("missing-workspace"), null));
     }
 
     @Test
@@ -47,14 +47,14 @@ class PiProcessSpecTest {
         Path workspace = Files.createDirectory(temp.resolve("tool-workspace"));
 
         try (PiToolBridge toolBridge = PiToolBridge.open(List.of(new LaunchTool()))) {
-            PiProcessSpec processSpec = PiProcessSpec.create(workspace, toolBridge);
+            PiProcessConfig config = PiProcessConfig.create(workspace, toolBridge);
 
-            assertContainsSequence(processSpec.command(), "--extension",
+            assertContainsSequence(config.command(), "--extension",
                     toolBridge.extensionFile().toRealPath().toString());
-            assertFalse(processSpec.command().contains("--tools"));
-            assertFalse(processSpec.command().contains("--skill"));
-            assertFalse(processSpec.command().contains("--prompt-template"));
-            assertTrue(processSpec.env().containsKey("PI_JAVA_TOOL_TOKEN"));
+            assertFalse(config.command().contains("--tools"));
+            assertFalse(config.command().contains("--skill"));
+            assertFalse(config.command().contains("--prompt-template"));
+            assertTrue(config.env().containsKey("PI_JAVA_TOOL_TOKEN"));
         }
     }
 

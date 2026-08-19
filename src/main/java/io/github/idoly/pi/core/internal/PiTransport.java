@@ -10,7 +10,7 @@ interface PiTransport extends AutoCloseable {
 
     Flow.Publisher<Object> inbound();
 
-    CompletionStage<PiProcessExit> exit();
+    CompletionStage<Integer> exit();
 
 
     @Override

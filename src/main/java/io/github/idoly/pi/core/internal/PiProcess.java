@@ -3,7 +3,6 @@ package io.github.idoly.pi.core.internal;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -14,7 +13,6 @@ import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Flow;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 final class PiProcess implements PiTransport {
@@ -24,9 +22,8 @@ final class PiProcess implements PiTransport {
     private final PiJsonCodec codec;
     private final ArrayBlockingQueue<PendingWrite> writes;
     private final PiPublisher<Object> inbound;
-    private final CompletableFuture<PiProcessExit> exit = new CompletableFuture<>();
+    private final CompletableFuture<Integer> exit = new CompletableFuture<>();
     private final AtomicReference<State> state = new AtomicReference<>(State.NEW);
-    private final AtomicBoolean closing = new AtomicBoolean();
     private volatile Process process;
     private volatile Future<?> writerTask;
     private volatile Future<?> stdoutTask;
@@ -46,10 +43,8 @@ final class PiProcess implements PiTransport {
                     new IllegalStateException("pi process can only be started once"));
         }
         try {
-            ProcessBuilder builder = new ProcessBuilder(options.command());
-            if (options.directory() != null) {
-                builder.directory(options.directory().toFile());
-            }
+            ProcessBuilder builder = new ProcessBuilder(options.command())
+                    .directory(options.directory().toFile());
             builder.environment().putAll(options.env());
             process = builder.start();
 
@@ -59,7 +54,6 @@ final class PiProcess implements PiTransport {
             process.onExit().whenComplete(this::onExit);
             return CompletableFuture.completedFuture(null);
         } catch (Exception failure) {
-            closing.set(true);
             state.set(State.FAILED);
             cancelTasks();
             Process current = process;
@@ -95,20 +89,20 @@ final class PiProcess implements PiTransport {
     }
 
     @Override
-    public CompletionStage<PiProcessExit> exit() {
+    public CompletionStage<Integer> exit() {
         return exit;
     }
 
     @Override
     public void close() {
         State previousState = state.getAndUpdate(currentState ->
-                currentState == State.RUNNING ? State.CLOSING : currentState);
+                currentState == State.NEW || currentState == State.RUNNING
+                        ? State.CLOSING : currentState);
         if (previousState == State.CLOSING
                 || previousState == State.TERMINATED
                 || previousState == State.FAILED) {
             return;
         }
-        closing.set(true);
         failWrites(new PiTransportException("pi process closed"));
 
         Process current = process;
@@ -116,7 +110,7 @@ final class PiProcess implements PiTransport {
         if (current == null) {
             state.set(State.TERMINATED);
             inbound.complete();
-            exit.complete(new PiProcessExit(-1));
+            exit.complete(-1);
             return;
         }
 
@@ -153,7 +147,7 @@ final class PiProcess implements PiTransport {
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
         } catch (Throwable failure) {
-            if (!closing.get()) {
+            if (state.get() == State.RUNNING) {
                 fail(new PiTransportException("RPC writer failed", failure));
             }
         } finally {
@@ -176,7 +170,7 @@ final class PiProcess implements PiTransport {
                 publish(finalLine);
             }
         } catch (Throwable failure) {
-            if (!closing.get()) {
+            if (state.get() == State.RUNNING) {
                 fail(new PiTransportException("RPC stdout reader failed", failure));
             }
         }
@@ -189,14 +183,13 @@ final class PiProcess implements PiTransport {
     }
 
     private void readStderr() {
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(
-                process.getErrorStream(), StandardCharsets.UTF_8))) {
+        try (BufferedReader reader = process.errorReader(StandardCharsets.UTF_8)) {
             String line;
             while ((line = reader.readLine()) != null) {
                 options.stderr().accept(line);
             }
         } catch (Throwable failure) {
-            if (!closing.get()) {
+            if (state.get() == State.RUNNING) {
                 fail(new PiTransportException("RPC stderr reader failed", failure));
             }
         }
@@ -207,17 +200,17 @@ final class PiProcess implements PiTransport {
             fail(new PiTransportException("Failed to observe pi process exit", failure));
             return;
         }
-        boolean requested = closing.get();
+        boolean requested = state.get() == State.CLOSING;
         state.set(State.TERMINATED);
-        PiProcessExit processExit = new PiProcessExit(exited.exitValue());
-        exit.complete(processExit);
-        if (requested || processExit.exitCode() == 0) {
+        int exitCode = exited.exitValue();
+        exit.complete(exitCode);
+        if (requested || exitCode == 0) {
             inbound.complete();
         } else {
             inbound.fail(new PiTransportException(
-                    "pi process exited unexpectedly with code " + processExit.exitCode()));
+                    "pi process exited unexpectedly with code " + exitCode));
         }
-        failWrites(new PiTransportException("pi process exited with code " + processExit.exitCode()));
+        failWrites(new PiTransportException("pi process exited with code " + exitCode));
     }
 
     private void fail(PiTransportException failure) {

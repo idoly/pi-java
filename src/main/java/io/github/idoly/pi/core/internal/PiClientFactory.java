@@ -1,6 +1,7 @@
 package io.github.idoly.pi.core.internal;
 
 import io.github.idoly.pi.core.PiClient;
+import io.github.idoly.pi.core.PiClientConfig;
 import io.github.idoly.pi.core.PiException;
 
 import java.nio.file.Path;
@@ -12,14 +13,17 @@ import java.util.concurrent.CompletionException;
 
 /** Internal entry point used by {@link PiClient#open(Path, Object[])}. */
 public final class PiClientFactory {
-    private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(15);
-
     private PiClientFactory() {
     }
 
     /** Opens and verifies a client. */
     public static PiClient open(Path workspace, Object... toolInstances) {
-        Objects.requireNonNull(workspace, "workspace");
+        return open(PiClientConfig.builder(workspace).build(), toolInstances);
+    }
+
+    /** Opens and verifies a client using explicit configuration. */
+    public static PiClient open(PiClientConfig config, Object... toolInstances) {
+        Objects.requireNonNull(config, "config");
         Objects.requireNonNull(toolInstances, "toolInstances");
         PiToolBridge toolBridge = null;
         PiClientImpl client = null;
@@ -28,8 +32,10 @@ public final class PiClientFactory {
                 toolBridge = PiToolBridge.open(List.of(toolInstances));
             }
             PiTransport transport = new PiProcess(
-                    PiProcessConfig.create(workspace, toolBridge));
-            client = create(transport, REQUEST_TIMEOUT, newPrefix(), toolBridge);
+                    PiProcessConfig.create(config, toolBridge));
+            client = new PiClientImpl(
+                    new PiConnection(transport, config.requestTimeout(), newPrefix()),
+                    toolBridge);
             client.start().toCompletableFuture().join();
             client.request("get_state").toCompletableFuture().join();
             return client;
@@ -44,7 +50,9 @@ public final class PiClientFactory {
     }
 
     static PiClientImpl createForTest(PiTransport transport) {
-        PiClientImpl client = create(transport, REQUEST_TIMEOUT, "test", null);
+        PiClientImpl client = new PiClientImpl(
+                new PiConnection(transport, Duration.ofSeconds(15), "test"),
+                null);
         try {
             client.start().toCompletableFuture().join();
             return client;
@@ -52,17 +60,6 @@ public final class PiClientFactory {
             client.close();
             throw unwrapFailure(failure);
         }
-    }
-
-    private static PiClientImpl create(
-            PiTransport transport,
-            Duration timeout,
-            String prefix,
-            PiToolBridge toolBridge
-    ) {
-        Objects.requireNonNull(transport, "transport");
-        return new PiClientImpl(
-                new PiRpcConnection(transport, timeout, prefix), toolBridge);
     }
 
     private static RuntimeException unwrapFailure(RuntimeException failure) {

@@ -1,6 +1,7 @@
 package io.github.idoly.pi.core.internal;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.idoly.pi.core.PiException;
 import io.github.idoly.pi.protocol.PiEvent;
 import io.github.idoly.pi.protocol.PiImage;
 import org.junit.jupiter.api.Test;
@@ -18,7 +19,7 @@ class PiJsonCodecTest {
 
     @Test
     void encodesPromptWithStableProtocolFields() {
-        byte[] encoded = codec.encode(PiCommand.prompt("pj-1", "hello"));
+        byte[] encoded = codec.encode(PiCommand.prompt("pj-1", "hello", List.of()));
 
         assertArrayEquals(
                 "{\"type\":\"prompt\",\"id\":\"pj-1\",\"message\":\"hello\"}"
@@ -61,7 +62,7 @@ class PiJsonCodecTest {
 
     @Test
     void rejectsResponseWithoutCriticalFields() {
-        assertThrows(PiProtocolException.class, () -> codec.decode(
+        assertThrows(PiException.class, () -> codec.decode(
                 "{\"type\":\"response\",\"command\":\"prompt\"}"
                         .getBytes(StandardCharsets.UTF_8)));
     }

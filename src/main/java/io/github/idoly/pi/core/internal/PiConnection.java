@@ -1,5 +1,6 @@
 package io.github.idoly.pi.core.internal;
 
+import io.github.idoly.pi.core.PiException;
 import io.github.idoly.pi.core.PiProcessExitException;
 import io.github.idoly.pi.core.PiRequestRejectedException;
 import io.github.idoly.pi.core.PiRequestTimeoutException;
@@ -17,7 +18,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
-final class PiRpcConnection implements AutoCloseable {
+final class PiConnection implements AutoCloseable {
     private final PiTransport transport;
     private final Duration timeout;
     private final String prefix;
@@ -27,7 +28,7 @@ final class PiRpcConnection implements AutoCloseable {
     private final AtomicBoolean started = new AtomicBoolean();
     private final AtomicBoolean closed = new AtomicBoolean();
 
-    PiRpcConnection(PiTransport transport, Duration timeout, String prefix) {
+    PiConnection(PiTransport transport, Duration timeout, String prefix) {
         this.transport = Objects.requireNonNull(transport, "transport");
         this.timeout = requirePositive(timeout, "timeout");
         if (prefix == null || prefix.isBlank()) {
@@ -102,7 +103,7 @@ final class PiRpcConnection implements AutoCloseable {
         if (!closed.compareAndSet(false, true)) {
             return;
         }
-        failPending(new PiTransportException("RPC client closed"));
+        failPending(new PiException("RPC client closed"));
         transport.close();
         inbound.complete();
     }
@@ -113,7 +114,7 @@ final class PiRpcConnection implements AutoCloseable {
             if (request != null) {
                 request.timeoutTask.cancel(false);
                 if (!request.command.equals(response.command())) {
-                    request.future.completeExceptionally(new PiTransportException(
+                    request.future.completeExceptionally(new PiException(
                             "Response command mismatch for " + response.requestId()
                                     + ": expected " + request.command
                                     + ", got " + response.command()));

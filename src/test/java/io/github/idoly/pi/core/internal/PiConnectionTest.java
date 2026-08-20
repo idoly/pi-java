@@ -16,14 +16,14 @@ import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 
-class PiRpcConnectionTest {
+class PiConnectionTest {
     private PiScriptedTransport transport;
-    private PiRpcConnection client;
+    private PiConnection client;
 
     @BeforeEach
     void setUp() {
         transport = new PiScriptedTransport();
-        client = new PiRpcConnection(transport, Duration.ofSeconds(1), "test");
+        client = new PiConnection(transport, Duration.ofSeconds(1), "test");
         client.start().toCompletableFuture().join();
     }
 
@@ -46,7 +46,7 @@ class PiRpcConnectionTest {
 
     @Test
     void mapsRejectedResponseToTypedException() throws Exception {
-        PiCommand command = PiCommand.prompt(client.nextRequestId(), "hello");
+        PiCommand command = PiCommand.prompt(client.nextRequestId(), "hello", java.util.List.of());
         var response = client.request(command).toCompletableFuture();
         transport.awaitCommand(Duration.ofSeconds(1));
         transport.emitInbound(new PiResponse(

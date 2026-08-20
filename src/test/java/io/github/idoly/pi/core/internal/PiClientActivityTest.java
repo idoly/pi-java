@@ -9,6 +9,7 @@ import io.github.idoly.pi.core.PiPrompt;
 import io.github.idoly.pi.core.PiActivity;
 import io.github.idoly.pi.core.PiActivityTimeoutException;
 import io.github.idoly.pi.protocol.PiEvent;
+import io.github.idoly.pi.protocol.PiImage;
 import io.github.idoly.pi.protocol.PiResponse;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -69,12 +70,25 @@ class PiClientActivityTest {
                 PiCommand.class, transport.awaitCommand(Duration.ofSeconds(1)));
         transport.emitInbound(success(prompt));
 
-        var steer = activity.steer("focus");
+        var steer = activity.steer(
+                "focus", List.of(new PiImage("YWJj", "image/png")));
         PiCommand steerCommand = assertInstanceOf(
                 PiCommand.class, transport.awaitCommand(Duration.ofSeconds(1)));
         assertEquals("steer", steerCommand.type());
+        assertEquals("image", ((List<?>) steerCommand.arguments().get("images")).stream()
+                .map(value -> (java.util.Map<?, ?>) value)
+                .findFirst()
+                .orElseThrow()
+                .get("type"));
         transport.emitInbound(success(steerCommand));
         steer.toCompletableFuture().get(1, TimeUnit.SECONDS);
+
+        var followUp = activity.followUp("then verify", List.of());
+        PiCommand followUpCommand = assertInstanceOf(
+                PiCommand.class, transport.awaitCommand(Duration.ofSeconds(1)));
+        assertEquals("follow_up", followUpCommand.type());
+        transport.emitInbound(success(followUpCommand));
+        followUp.toCompletableFuture().get(1, TimeUnit.SECONDS);
 
         assertThrows(IllegalArgumentException.class, () -> client.request("abort"));
     }
@@ -107,6 +121,14 @@ class PiClientActivityTest {
         }
 
         assertEquals(PiClientState.FAILED, client.state());
+    }
+
+    @Test
+    void closeRemainsTerminatedWhenCalledMoreThanOnce() {
+        client.close();
+        client.close();
+
+        assertEquals(PiClientState.TERMINATED, client.state());
     }
 
     @Test

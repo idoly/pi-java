@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.idoly.pi.core.PiException;
 import io.github.idoly.pi.protocol.PiEvent;
 import io.github.idoly.pi.protocol.PiResponse;
 
@@ -21,7 +22,7 @@ final class PiJsonCodec {
         try {
             return mapper.writeValueAsBytes(root);
         } catch (JsonProcessingException cause) {
-            throw new PiProtocolException("Failed to encode " + command.type(), cause);
+            throw new PiException("Failed to encode " + command.type(), cause);
         }
     }
 
@@ -30,10 +31,10 @@ final class PiJsonCodec {
         try {
             root = mapper.readTree(jsonBytes);
         } catch (IOException cause) {
-            throw new PiProtocolException("Invalid RPC JSON", cause);
+            throw new PiException("Invalid RPC JSON", cause);
         }
         if (root == null || !root.isObject()) {
-            throw new PiProtocolException("RPC message must be a JSON object");
+            throw new PiException("RPC message must be a JSON object");
         }
 
         String type = requiredText(root, "type");
@@ -45,7 +46,7 @@ final class PiJsonCodec {
     private static PiResponse decodeResponse(JsonNode root) {
         JsonNode success = root.get("success");
         if (success == null || !success.isBoolean()) {
-            throw new PiProtocolException("RPC response field 'success' must be boolean");
+            throw new PiException("RPC response field 'success' must be boolean");
         }
         JsonNode id = root.get("id");
         return new PiResponse(
@@ -61,7 +62,7 @@ final class PiJsonCodec {
     private static String requiredText(JsonNode root, String fieldName) {
         JsonNode field = root.get(fieldName);
         if (field == null || !field.isTextual() || field.textValue().isBlank()) {
-            throw new PiProtocolException(
+            throw new PiException(
                     "RPC field '" + fieldName + "' must be non-blank text");
         }
         return field.textValue();

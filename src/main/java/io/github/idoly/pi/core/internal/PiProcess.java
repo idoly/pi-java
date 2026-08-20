@@ -1,5 +1,7 @@
 package io.github.idoly.pi.core.internal;
 
+import io.github.idoly.pi.core.PiException;
+
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
@@ -60,8 +62,8 @@ final class PiProcess implements PiTransport {
             if (current != null && current.isAlive()) {
                 current.destroyForcibly();
             }
-            PiTransportException startFailure =
-                    new PiTransportException("Failed to start pi process", failure);
+            PiException startFailure =
+                    new PiException("Failed to start pi process", failure);
             inbound.fail(startFailure);
             exit.completeExceptionally(startFailure);
             return CompletableFuture.failedFuture(startFailure);
@@ -73,12 +75,12 @@ final class PiProcess implements PiTransport {
         Objects.requireNonNull(command, "command");
         if (state.get() != State.RUNNING) {
             return CompletableFuture.failedFuture(
-                    new PiTransportException("pi process is not running: " + state.get()));
+                    new PiException("pi process is not running: " + state.get()));
         }
         PendingWrite write = new PendingWrite(command, new CompletableFuture<>());
         if (!writes.offer(write)) {
             write.completion().completeExceptionally(
-                    new PiTransportException("RPC command queue is full"));
+                    new PiException("RPC command queue is full"));
         }
         return write.completion();
     }
@@ -103,7 +105,7 @@ final class PiProcess implements PiTransport {
                 || previousState == State.FAILED) {
             return;
         }
-        failWrites(new PiTransportException("pi process closed"));
+        failWrites(new PiException("pi process closed"));
 
         Process current = process;
         cancelTasks();
@@ -148,10 +150,10 @@ final class PiProcess implements PiTransport {
             Thread.currentThread().interrupt();
         } catch (Throwable failure) {
             if (state.get() == State.RUNNING) {
-                fail(new PiTransportException("RPC writer failed", failure));
+                fail(new PiException("RPC writer failed", failure));
             }
         } finally {
-            failWrites(new PiTransportException("RPC writer stopped"));
+            failWrites(new PiException("RPC writer stopped"));
         }
     }
 
@@ -171,7 +173,7 @@ final class PiProcess implements PiTransport {
             }
         } catch (Throwable failure) {
             if (state.get() == State.RUNNING) {
-                fail(new PiTransportException("RPC stdout reader failed", failure));
+                fail(new PiException("RPC stdout reader failed", failure));
             }
         }
     }
@@ -190,14 +192,14 @@ final class PiProcess implements PiTransport {
             }
         } catch (Throwable failure) {
             if (state.get() == State.RUNNING) {
-                fail(new PiTransportException("RPC stderr reader failed", failure));
+                fail(new PiException("RPC stderr reader failed", failure));
             }
         }
     }
 
     private void onExit(Process exited, Throwable failure) {
         if (failure != null) {
-            fail(new PiTransportException("Failed to observe pi process exit", failure));
+            fail(new PiException("Failed to observe pi process exit", failure));
             return;
         }
         boolean requested = state.get() == State.CLOSING;
@@ -207,13 +209,13 @@ final class PiProcess implements PiTransport {
         if (requested || exitCode == 0) {
             inbound.complete();
         } else {
-            inbound.fail(new PiTransportException(
+            inbound.fail(new PiException(
                     "pi process exited unexpectedly with code " + exitCode));
         }
-        failWrites(new PiTransportException("pi process exited with code " + exitCode));
+        failWrites(new PiException("pi process exited with code " + exitCode));
     }
 
-    private void fail(PiTransportException failure) {
+    private void fail(PiException failure) {
         state.set(State.FAILED);
         inbound.fail(failure);
         failWrites(failure);

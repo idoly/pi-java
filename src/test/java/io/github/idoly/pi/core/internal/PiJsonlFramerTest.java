@@ -1,5 +1,6 @@
 package io.github.idoly.pi.core.internal;
 
+import io.github.idoly.pi.core.PiException;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
@@ -39,7 +40,7 @@ class PiJsonlFramerTest {
     void rejectsOversizedRecordBeforeUnboundedAllocation() {
         PiJsonlFramer framer = new PiJsonlFramer(4);
 
-        assertThrows(PiTransportException.class,
+        assertThrows(PiException.class,
                 () -> framer.accept("12345".getBytes(StandardCharsets.UTF_8), 0, 5));
     }
 }

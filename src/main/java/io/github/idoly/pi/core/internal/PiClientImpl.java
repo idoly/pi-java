@@ -1,43 +1,35 @@
 package io.github.idoly.pi.core.internal;
 
-import com.fasterxml.jackson.databind.JsonNode;
+import io.github.idoly.pi.core.PiActivity;
 import io.github.idoly.pi.core.PiClient;
 import io.github.idoly.pi.core.PiClientState;
 import io.github.idoly.pi.core.PiException;
 import io.github.idoly.pi.core.PiPrompt;
-import io.github.idoly.pi.core.PiResult;
-import io.github.idoly.pi.core.PiActivity;
-import io.github.idoly.pi.core.PiActivityTimeoutException;
 import io.github.idoly.pi.protocol.PiEvent;
 import io.github.idoly.pi.protocol.PiResponse;
 
-import java.time.Duration;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Flow;
-import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 final class PiClientImpl implements PiClient {
     private static final Set<String> ACTIVITY_COMMANDS =
             Set.of("prompt", "steer", "follow_up", "abort");
 
-    private final PiRpcConnection connection;
+    private final PiConnection connection;
     private final PiPublisher<PiEvent> events;
     private final PiToolBridge toolBridge;
-    private final AtomicReference<PiClientState> state = new AtomicReference<>(PiClientState.STARTING);
-    private final AtomicReference<Activity> active = new AtomicReference<>();
+    private final AtomicReference<PiClientState> state =
+            new AtomicReference<>(PiClientState.STARTING);
+    private final AtomicReference<PiActivityImpl> active = new AtomicReference<>();
 
-    PiClientImpl(PiRpcConnection connection, PiToolBridge toolBridge) {
+    PiClientImpl(PiConnection connection, PiToolBridge toolBridge) {
         this.connection = Objects.requireNonNull(connection, "connection");
         this.toolBridge = toolBridge;
-        this.events = new PiPublisher<>(PiThreads.executor(), 1024);
+        events = new PiPublisher<>(PiThreads.executor(), 1024);
     }
 
     CompletionStage<Void> start() {
@@ -61,20 +53,20 @@ final class PiClientImpl implements PiClient {
     public PiActivity prompt(PiPrompt prompt) {
         Objects.requireNonNull(prompt, "prompt");
         if (!state.compareAndSet(PiClientState.IDLE, PiClientState.ACTIVE)) {
-            throw new IllegalStateException("Prompt requires IDLE client, current state is " + state.get());
+            throw new IllegalStateException(
+                    "Prompt requires IDLE client, current state is " + state.get());
         }
 
         String requestId = connection.nextRequestId();
-        Activity activity = new Activity(requestId, prompt.timeout());
+        PiActivityImpl activity = new PiActivityImpl(
+                requestId, prompt.timeout(), connection, this);
         if (!active.compareAndSet(null, activity)) {
             state.set(PiClientState.FAILED);
             throw new IllegalStateException("Client has an inconsistent active activity");
         }
 
-        PiCommand command = PiCommand.prompt(
-                requestId, prompt.message(), prompt.images());
-        activity.scheduleTimeout();
-        connection.request(command).whenComplete(activity::onAcceptance);
+        activity.start(PiCommand.prompt(
+                requestId, prompt.message(), prompt.images()));
         return activity;
     }
 
@@ -100,11 +92,13 @@ final class PiClientImpl implements PiClient {
 
     @Override
     public void close() {
-        PiClientState previous = state.getAndSet(PiClientState.STOPPING);
+        PiClientState previous = state.getAndUpdate(current ->
+                current == PiClientState.TERMINATED || current == PiClientState.STOPPING
+                        ? current : PiClientState.STOPPING);
         if (previous == PiClientState.TERMINATED || previous == PiClientState.STOPPING) {
             return;
         }
-        Activity activity = active.getAndSet(null);
+        PiActivityImpl activity = active.getAndSet(null);
         if (activity != null) {
             activity.fail(new PiException("Client closed while activity was active"));
         }
@@ -116,12 +110,28 @@ final class PiClientImpl implements PiClient {
         state.set(PiClientState.TERMINATED);
     }
 
+    boolean isActive(PiActivityImpl activity) {
+        return active.get() == activity && state.get() == PiClientState.ACTIVE;
+    }
+
+    void release(PiActivityImpl activity) {
+        if (active.compareAndSet(activity, null)) {
+            state.compareAndSet(PiClientState.ACTIVE, PiClientState.IDLE);
+        }
+    }
+
+    void fail(PiActivityImpl activity) {
+        if (active.compareAndSet(activity, null)) {
+            state.compareAndSet(PiClientState.ACTIVE, PiClientState.FAILED);
+        }
+    }
+
     private void onInbound(Object message) {
         if (!(message instanceof PiEvent event)) {
             return;
         }
         events.publish(event);
-        Activity activity = active.get();
+        PiActivityImpl activity = active.get();
         if (activity != null) {
             activity.onEvent(event);
         }
@@ -129,157 +139,11 @@ final class PiClientImpl implements PiClient {
 
     private void failClient(Throwable failure) {
         state.set(PiClientState.FAILED);
-        Activity activity = active.getAndSet(null);
+        PiActivityImpl activity = active.getAndSet(null);
         if (activity != null) {
             activity.fail(failure);
         }
         events.fail(failure);
-    }
-
-    private CompletionStage<Void> sendAbort() {
-        if (state.get() != PiClientState.ACTIVE) {
-            return CompletableFuture.completedFuture(null);
-        }
-        return connection.request("abort").thenApply(ignored -> null);
-    }
-
-    private final class Activity implements PiActivity {
-        private final String requestId;
-        private final Duration timeout;
-        private final PiBufferedPublisher<PiEvent> events;
-        private final CompletableFuture<PiResponse> acceptance = new CompletableFuture<>();
-        private final CompletableFuture<PiResult> completion = new CompletableFuture<>();
-        private final List<JsonNode> messages = new ArrayList<>();
-        private final StringBuilder streamed = new StringBuilder();
-        private String text = "";
-        private ScheduledFuture<?> timeoutTask;
-        private boolean settled;
-        private boolean aborted;
-
-        private Activity(String requestId, Duration timeout) {
-            this.requestId = requestId;
-            this.timeout = timeout;
-            this.events = new PiBufferedPublisher<>(PiThreads.executor(), 1024);
-        }
-
-        @Override
-        public String requestId() {
-            return requestId;
-        }
-
-        @Override
-        public Flow.Publisher<PiEvent> events() {
-            return events;
-        }
-
-        @Override
-        public CompletionStage<PiResponse> accepted() {
-            return acceptance;
-        }
-
-        @Override
-        public CompletionStage<PiResult> completion() {
-            return completion;
-        }
-
-        @Override
-        public CompletionStage<PiResponse> steer(String message) {
-            requireActive("steer");
-            return connection.request(PiCommand.steer(connection.nextRequestId(), message));
-        }
-
-        @Override
-        public CompletionStage<PiResponse> followUp(String message) {
-            requireActive("follow_up");
-            return connection.request(PiCommand.followUp(connection.nextRequestId(), message));
-        }
-
-        @Override
-        public CompletionStage<Void> abort() {
-            requireActive("abort");
-            return sendAbort();
-        }
-
-        private void requireActive(String operation) {
-            if (active.get() != this || state.get() != PiClientState.ACTIVE) {
-                throw new IllegalStateException(operation + " requires an active activity");
-            }
-        }
-
-        private synchronized void onAcceptance(PiResponse response, Throwable failure) {
-            if (failure != null) {
-                acceptance.completeExceptionally(failure);
-                if (active.compareAndSet(this, null)) {
-                    state.compareAndSet(PiClientState.ACTIVE, PiClientState.IDLE);
-                }
-                fail(failure);
-                return;
-            }
-            acceptance.complete(response);
-            completeIfSettled();
-        }
-
-        private synchronized void onEvent(PiEvent event) {
-            events.publish(event);
-            event.textDelta().ifPresent(streamed::append);
-            if ("message_start".equals(event.type())
-                    && "assistant".equals(event.raw().path("message").path("role").asText())) {
-                streamed.setLength(0);
-            }
-            if ("message_end".equals(event.type())) {
-                JsonNode message = event.raw().get("message");
-                if (message != null && message.isObject()) {
-                    messages.add(message.deepCopy());
-                    if ("assistant".equals(message.path("role").asText())) {
-                        text = assistantText(message, streamed.toString());
-                        aborted |= "aborted".equals(message.path("stopReason").asText());
-                    }
-                }
-            }
-            if ("agent_settled".equals(event.type())) {
-                settled = true;
-                completeIfSettled();
-            }
-        }
-
-        private synchronized void completeIfSettled() {
-            if (!settled || !acceptance.isDone() || acceptance.isCompletedExceptionally()
-                    || completion.isDone()) {
-                return;
-            }
-            PiResult activityResult = new PiResult(text, messages, aborted);
-            cancelTimeout();
-            active.compareAndSet(this, null);
-            state.compareAndSet(PiClientState.ACTIVE, PiClientState.IDLE);
-            events.complete();
-            completion.complete(activityResult);
-        }
-
-        private synchronized void fail(Throwable failure) {
-            cancelTimeout();
-            completion.completeExceptionally(failure);
-            events.fail(failure);
-        }
-
-        private void scheduleTimeout() {
-            timeoutTask = PiThreads.scheduler().schedule(() -> {
-                synchronized (this) {
-                    if (completion.isDone()) {
-                        return;
-                    }
-                    sendAbort();
-                    active.compareAndSet(this, null);
-                    state.compareAndSet(PiClientState.ACTIVE, PiClientState.FAILED);
-                    fail(new PiActivityTimeoutException(requestId));
-                }
-            }, timeout.toNanos(), TimeUnit.NANOSECONDS);
-        }
-
-        private void cancelTimeout() {
-            if (timeoutTask != null) {
-                timeoutTask.cancel(false);
-            }
-        }
     }
 
     private final class InboundSubscriber implements Flow.Subscriber<Object> {
@@ -300,30 +164,10 @@ final class PiClientImpl implements PiClient {
 
         @Override
         public void onComplete() {
-            Activity activity = active.get();
-            if (activity != null && !activity.completion.isDone()) {
+            PiActivityImpl activity = active.get();
+            if (activity != null && !activity.completion().toCompletableFuture().isDone()) {
                 failClient(new PiException("RPC stream completed before agent_settled"));
             }
         }
-    }
-
-    private static String assistantText(JsonNode assistantMessage, String streamedFallback) {
-        JsonNode content = assistantMessage.get("content");
-        if (content == null) {
-            return streamedFallback;
-        }
-        if (content.isTextual()) {
-            return content.textValue();
-        }
-        if (!content.isArray()) {
-            return streamedFallback;
-        }
-        StringBuilder text = new StringBuilder();
-        for (JsonNode block : content) {
-            if ("text".equals(block.path("type").asText()) && block.path("text").isTextual()) {
-                text.append(block.path("text").textValue());
-            }
-        }
-        return text.isEmpty() ? streamedFallback : text.toString();
     }
 }

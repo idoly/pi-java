@@ -19,11 +19,24 @@ record PiCommand(String id, String type, Map<String, ?> arguments) {
         arguments = arguments == null ? Map.of() : Map.copyOf(arguments);
     }
 
-    static PiCommand prompt(String id, String message) {
-        return prompt(id, message, List.of());
+    static PiCommand prompt(String id, String message, List<PiImage> images) {
+        return withMessage(id, "prompt", message, images);
     }
 
-    static PiCommand prompt(String id, String message, List<PiImage> images) {
+    static PiCommand steer(String id, String message, List<PiImage> images) {
+        return withMessage(id, "steer", message, images);
+    }
+
+    static PiCommand followUp(String id, String message, List<PiImage> images) {
+        return withMessage(id, "follow_up", message, images);
+    }
+
+    private static PiCommand withMessage(
+            String id,
+            String type,
+            String message,
+            List<PiImage> images
+    ) {
         Objects.requireNonNull(message, "message");
         Map<String, Object> arguments = new LinkedHashMap<>();
         arguments.put("message", message);
@@ -35,23 +48,11 @@ record PiCommand(String id, String type, Map<String, ?> arguments) {
                             "mimeType", image.mimeType()))
                     .toList());
         }
-        return new PiCommand(id, "prompt", arguments);
-    }
-
-    static PiCommand steer(String id, String message) {
-        return withMessage(id, "steer", message);
-    }
-
-    static PiCommand followUp(String id, String message) {
-        return withMessage(id, "follow_up", message);
+        return new PiCommand(id, type, arguments);
     }
 
     static PiCommand simple(String id, String type) {
         return new PiCommand(id, type, Map.of());
     }
 
-    private static PiCommand withMessage(String id, String type, String message) {
-        Objects.requireNonNull(message, "message");
-        return new PiCommand(id, type, Map.of("message", message));
-    }
 }

@@ -1,7 +1,5 @@
 package io.github.idoly.pi.core.internal;
 
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -10,39 +8,24 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.atomic.AtomicLong;
 
 final class PiThreads {
-    private static final Pool POOL = createPool();
-    private static final ScheduledExecutorService SCHEDULER = createScheduler();
+    private static final ExecutorService EXECUTOR =
+            Executors.newCachedThreadPool(threadFactory("pi-worker-"));
+    private static final ScheduledThreadPoolExecutor SCHEDULER = createScheduler();
 
     private PiThreads() {
     }
 
     static ExecutorService executor() {
-        return POOL.executor();
+        return EXECUTOR;
     }
 
     static ScheduledExecutorService scheduler() {
         return SCHEDULER;
     }
 
-    static boolean virtual() {
-        return POOL.virtual();
-    }
-
-    private static Pool createPool() {
-        try {
-            Method factory = Executors.class.getMethod("newVirtualThreadPerTaskExecutor");
-            return new Pool((ExecutorService) factory.invoke(null), true);
-        } catch (NoSuchMethodException ignored) {
-            return new Pool(Executors.newCachedThreadPool(threadFactory("pi-worker-")), false);
-        } catch (IllegalAccessException | InvocationTargetException failure) {
-            throw new ExceptionInInitializerError(failure);
-        }
-    }
-
-    private static ScheduledExecutorService createScheduler() {
-        int size = Math.max(2, Math.min(8, Runtime.getRuntime().availableProcessors()));
+    private static ScheduledThreadPoolExecutor createScheduler() {
         ScheduledThreadPoolExecutor scheduler =
-                new ScheduledThreadPoolExecutor(size, threadFactory("pi-scheduler-"));
+                new ScheduledThreadPoolExecutor(1, threadFactory("pi-scheduler-"));
         scheduler.setRemoveOnCancelPolicy(true);
         return scheduler;
     }
@@ -54,8 +37,5 @@ final class PiThreads {
             thread.setDaemon(true);
             return thread;
         };
-    }
-
-    private record Pool(ExecutorService executor, boolean virtual) {
     }
 }

@@ -33,7 +33,7 @@ class PiProcessTest {
         );
 
         PiProcess process = new PiProcess(processOptions);
-        PiRpcConnection client = new PiRpcConnection(process, Duration.ofSeconds(2), "stdio-test");
+        PiConnection client = new PiConnection(process, Duration.ofSeconds(2), "stdio-test");
         try {
             client.start().toCompletableFuture().get(2, TimeUnit.SECONDS);
             var response = client.request("get_state").toCompletableFuture()

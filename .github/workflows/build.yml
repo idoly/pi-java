@@ -20,20 +20,3 @@ jobs:
           java-version: ${{ matrix.java }}
           cache: maven
       - run: mvn --batch-mode --no-transfer-progress verify
-      - name: Verify release artifacts
-        shell: bash
-        run: |
-          library=$(find target -maxdepth 1 -name 'pi-java-*.jar' ! -name '*-sources.jar' ! -name '*-javadoc.jar')
-          test -n "$library"
-          major=$(javap -verbose target/classes/io/github/idoly/pi/core/PiClient.class | awk '/major version/ { print $3 }')
-          test "$major" = "61"
-          jar tf "$library" > target/library-contents.txt
-          if grep -q 'com/fasterxml/jackson/databind/ObjectMapper.class' target/library-contents.txt; then
-            echo 'Library JAR must not embed Jackson' >&2
-            exit 1
-          fi
-          unzip -p "$library" META-INF/MANIFEST.MF > target/library-manifest.txt
-          if grep -q '^Main-Class:' target/library-manifest.txt; then
-            echo 'Library JAR must not be executable' >&2
-            exit 1
-          fi

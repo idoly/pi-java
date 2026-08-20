@@ -1,5 +1,7 @@
 package io.github.idoly.pi.core.internal;
 
+import io.github.idoly.pi.core.PiException;
+
 import java.io.ByteArrayOutputStream;
 import java.util.ArrayList;
 import java.util.List;
@@ -40,7 +42,7 @@ final class PiJsonlFramer {
 
     private void append(byte[] bytes, int offset, int length) {
         if ((long) currentLine.size() + length > maxLineBytes) {
-            throw new PiTransportException("RPC JSONL line exceeds " + maxLineBytes + " bytes");
+            throw new PiException("RPC JSONL line exceeds " + maxLineBytes + " bytes");
         }
         currentLine.write(bytes, offset, length);
     }

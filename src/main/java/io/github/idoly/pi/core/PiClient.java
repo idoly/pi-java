@@ -27,6 +27,11 @@ public interface PiClient extends AutoCloseable {
         return PiClientFactory.open(workspace, toolInstances);
     }
 
+    /** Opens a client using explicit launch and runtime configuration. */
+    static PiClient open(PiClientConfig config, Object... toolInstances) {
+        return PiClientFactory.open(config, toolInstances);
+    }
+
     /** Starts an activity for a text prompt. */
     PiActivity prompt(String message);
 

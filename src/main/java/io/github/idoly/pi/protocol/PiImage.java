@@ -1,7 +1,5 @@
 package io.github.idoly.pi.protocol;
 
-import java.util.Objects;
-
 /**
  * Base64-encoded image content sent with a prompt.
  *
@@ -10,8 +8,8 @@ import java.util.Objects;
  */
 public record PiImage(String data, String mimeType) {
     public PiImage {
-        Objects.requireNonNull(data, "data");
-        Objects.requireNonNull(mimeType, "mimeType");
+        if (data == null || data.isBlank()) throw new IllegalArgumentException("Image data must not be blank");
+        if (mimeType == null || mimeType.isBlank()) throw new IllegalArgumentException("Image MIME type must not be blank");
     }
 
 }

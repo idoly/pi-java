@@ -6,10 +6,11 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-latest]
         java: [17, 25]
 
     steps:
@@ -20,3 +21,25 @@ jobs:
           java-version: ${{ matrix.java }}
           cache: maven
       - run: mvn --batch-mode --no-transfer-progress verify
+
+  rpc-compatibility:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        pi: ['1.1.0', latest]
+        java: [17, 25]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+          cache: maven
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm install --global @earendil-works/pi-coding-agent@${{ matrix.pi }}
+      - run: pi --version
+      - run: mvn --batch-mode --no-transfer-progress -Dpi.test.real=true verify

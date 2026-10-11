@@ -18,6 +18,7 @@ public record PiEvent(String type, JsonNode raw) {
 
     /** Returns a text delta when this is a compatible assistant message update. */
     public Optional<String> textDelta() {
+        if (!"message_update".equals(type)) return Optional.empty();
         JsonNode event = raw.get("assistantMessageEvent");
         return event != null
                 && "text_delta".equals(event.path("type").asText())

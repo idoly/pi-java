@@ -176,8 +176,8 @@ class PiClientIntegrationTest {
     }
 
     @Test void deadlineRequiresNewClient() throws Exception {
-        try (PiClient client = open()) {
-            PiActivity activity = client.prompt("PI_TEST_WAIT", 1);
+        try (PiClient client = PiClient.open(settings().noSession(true).activityTimeout(1).build())) {
+            PiActivity activity = client.prompt("PI_TEST_WAIT");
             assertTrue(activity.accepted().toCompletableFuture().get(5, TimeUnit.SECONDS).success());
             var failure = assertThrows(ExecutionException.class, () -> activity.completion().toCompletableFuture().get(5, TimeUnit.SECONDS));
             assertInstanceOf(ActivityTimeoutException.class, failure.getCause());

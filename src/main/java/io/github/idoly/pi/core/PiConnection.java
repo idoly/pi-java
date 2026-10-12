@@ -14,15 +14,15 @@ import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Flow;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
 /** Request correlation over one PiProcess. Internal response timeouts use milliseconds. */
-final class PiConnection implements AutoCloseable, Flow.Subscriber<Object> {
+final class PiConnection implements AutoCloseable {
+    private enum State { NEW, RUNNING, FAILED, CLOSED }
+
     record Request(String id, String type, Map<String, ?> arguments) {
         Request {
             if (id == null || id.isBlank()) throw new IllegalArgumentException("Request id must not be blank");
@@ -48,10 +48,8 @@ final class PiConnection implements AutoCloseable, Flow.Subscriber<Object> {
     private final String prefix;
     private final AtomicLong sequence = new AtomicLong();
     private final Map<String, CompletableFuture<PiResponse>> pending = new ConcurrentHashMap<>();
-    private final AtomicBoolean started = new AtomicBoolean();
-    private final AtomicBoolean closed = new AtomicBoolean();
     private final Object lifecycle = new Object();
-    private boolean failed;
+    private volatile State state = State.NEW;
     private Consumer<Object> listener = ignored -> {};
     private Consumer<Throwable> failureListener = ignored -> {};
     private Consumer<String> diagnostics = ignored -> {};
@@ -64,16 +62,26 @@ final class PiConnection implements AutoCloseable, Flow.Subscriber<Object> {
 
     void diagnostics(Consumer<String> diagnostics) { this.diagnostics = diagnostics; }
     void listen(Consumer<Object> listener, Consumer<Throwable> failureListener) {
-        if (started.get()) throw new IllegalStateException("Listener must be installed before start");
-        this.listener = Objects.requireNonNull(listener, "listener");
-        this.failureListener = Objects.requireNonNull(failureListener, "failureListener");
+        synchronized (lifecycle) {
+            if (state != State.NEW) throw new IllegalStateException("Listener must be installed before start");
+            this.listener = Objects.requireNonNull(listener, "listener");
+            this.failureListener = Objects.requireNonNull(failureListener, "failureListener");
+        }
     }
     CompletionStage<Void> start() {
-        if (!started.compareAndSet(false, true)) {
-            return CompletableFuture.failedFuture(new IllegalStateException("Connection can only be started once"));
+        synchronized (lifecycle) {
+            if (state != State.NEW) {
+                return CompletableFuture.failedFuture(new IllegalStateException("Connection can only be started once"));
+            }
+            state = State.RUNNING;
         }
-        process.inbound().subscribe(this);
-        return process.start();
+        process.termination().whenComplete((code, failure) -> {
+            if (state == State.CLOSED) return;
+            Throwable reason = failure == null ? new ProcessExitException(code) : PiSupport.unwrap(failure);
+            failPending(reason);
+            failureListener.accept(reason);
+        });
+        return process.start(this::onRecord);
     }
     String nextRequestId() { return "pj-" + prefix + "-" + sequence.incrementAndGet(); }
     CompletionStage<PiResponse> request(String command) { return request(Request.simple(nextRequestId(), command)); }
@@ -86,7 +94,7 @@ final class PiConnection implements AutoCloseable, Flow.Subscriber<Object> {
     CompletionStage<PiResponse> request(Request request) { return request(request, timeoutMillis); }
 
     CompletionStage<PiResponse> request(Request request, long timeoutMillis) {
-        if (timeoutMillis < 1) throw new IllegalArgumentException("Response timeout must be positive milliseconds");
+        PiSupport.positive(timeoutMillis, "Response timeout milliseconds");
         synchronized (lifecycle) {
             if (!running()) return CompletableFuture.failedFuture(new IllegalStateException("Client is not running"));
             CompletableFuture<PiResponse> response = new CompletableFuture<>();
@@ -126,11 +134,14 @@ final class PiConnection implements AutoCloseable, Flow.Subscriber<Object> {
             return process.send(new Request(id, "extension_ui_response", values));
         }
     }
-    private boolean running() { return started.get() && !closed.get() && !failed; }
+    private boolean running() { return state == State.RUNNING; }
 
     @Override public void close() {
         boolean first;
-        synchronized (lifecycle) { first = closed.compareAndSet(false, true); }
+        synchronized (lifecycle) {
+            first = state != State.CLOSED;
+            state = State.CLOSED;
+        }
         try {
             if (first) failPending(new PiException("RPC client closed"));
         } finally {
@@ -138,8 +149,7 @@ final class PiConnection implements AutoCloseable, Flow.Subscriber<Object> {
             process.close();
         }
     }
-    @Override public void onSubscribe(Flow.Subscription subscription) { subscription.request(Long.MAX_VALUE); }
-    @Override public void onNext(Object message) {
+    private void onRecord(Object message) {
         if (message instanceof PiResponse response && response.requestId() != null) {
             CompletableFuture<PiResponse> request = pending.remove(response.requestId());
             if (request != null) {
@@ -150,21 +160,10 @@ final class PiConnection implements AutoCloseable, Flow.Subscriber<Object> {
         }
         listener.accept(message);
     }
-    @Override public void onError(Throwable failure) {
-        failPending(failure);
-        failureListener.accept(failure);
-    }
-    @Override public void onComplete() {
-        // Stream completion follows the last response, unlike physical process exit.
-        process.exit().whenComplete((code, failure) -> {
-            if (failure != null) onError(failure);
-            else if (!closed.get()) onError(new ProcessExitException(code));
-        });
-    }
     private void failPending(Throwable failure) {
         List<CompletableFuture<PiResponse>> requests;
         synchronized (lifecycle) {
-            failed = true;
+            if (state != State.CLOSED) state = State.FAILED;
             requests = new ArrayList<>(pending.values());
             pending.clear();
         }

@@ -46,7 +46,7 @@ public class App {
 
 一个 Client 管理一个 Pi 进程和会话，同时只允许一个 Activity。`accepted()` 表示输入被接受，`completion()` 等待输入被 handled 或运行已 settled。默认只保留最终文本，`retainMessages(true)` 保留完整消息。
 
-所有公开期限均为正数秒：RPC 默认 15 秒、Activity 默认 600 秒。可用 `requestTimeout(30)`、`prompt(text, 600)`、`request(command, arguments, 30)` 指定。
+所有公开期限均为秒：RPC 默认 15 秒、Activity 默认 600 秒。默认期限可用 `requestTimeout(30)`、`activityTimeout(600)` 配置，也可在单次 `prompt(text, 600)`、`request(command, arguments, 30)` 中指定。
 
 事件使用 `client.events()` / `activity.events()`；Activity 提供 `steer`、`followUp` 和 `abort`。普通命令使用 `client.request`，Extension UI 回复使用 `client.respondToUi`。完整参数与行为见[配置与架构](docs/architecture.md)。
 

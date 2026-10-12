@@ -87,21 +87,20 @@ public final class PiActivity {
             if (cancellation != null) throw new IllegalStateException("Activity is being aborted");
             CompletionStage<PiResponse> request = owner.control(this, command);
             pendingControls++;
-            return PiClient.external(request.whenComplete((response, failure) -> {
+            return PiSupport.external(request.whenComplete((response, failure) -> {
                 synchronized (owner.lifecycle) {
                     pendingControls--;
                     if (terminal) return;
-                    if (failure != null && !(PiClient.unwrap(failure) instanceof RequestRejectedException)) {
-                        owner.fail(this);
-                        fail(PiClient.unwrap(failure));
+                    if (failure != null) {
+                        Throwable cause = PiSupport.unwrap(failure);
+                        if (!(cause instanceof RequestRejectedException)) fail(cause);
+                        else completeIfReady();
                         return;
                     }
-                    if (failure == null && !(response.data() != null
-                            && "handled".equals(response.data().path("disposition").asText()))) {
+                    if (!"handled".equals(dispositionOf(response))) {
                         queuedControl = true;
                         if (settled || "handled".equals(disposition)) {
                             PiException ended = new PiException(command.type() + " was queued after the activity ended; recreate the client");
-                            owner.fail(this);
                             fail(ended);
                             throw ended;
                         }
@@ -130,11 +129,11 @@ public final class PiActivity {
             }).whenComplete((ignored, failure) -> {
                 synchronized (owner.lifecycle) {
                     pendingControls--;
-                    if (failure != null) { owner.fail(this); fail(PiClient.unwrap(failure)); }
+                    if (failure != null) fail(PiSupport.unwrap(failure));
                     else completeIfReady();
                 }
             });
-            cancellation = PiClient.external(operation);
+            cancellation = PiSupport.external(operation);
             return cancellation;
         }
     }
@@ -143,47 +142,57 @@ public final class PiActivity {
     void onEvent(PiEvent event) {
         if (terminal) return;
         events.publish(event);
-        if ("agent_start".equals(event.type())) { runStarted = true; settled = false; }
-        if ("message_start".equals(event.type()) && "assistant".equals(event.raw().path("message").path("role").asText())) {
-            streamedBytes = 0;
-            if (!config.retainMessages()) text = "";
-        }
-        String delta = event.textDelta().orElse(null);
-        if (delta != null) {
-            long bytes = delta.getBytes(StandardCharsets.UTF_8).length;
-            if (!withinBudget(messageBytes + streamedBytes + bytes)) return;
-            streamedBytes += bytes;
-        }
-        if ("message_end".equals(event.type())) {
-            JsonNode message = event.raw().get("message");
-            if (message != null && message.isObject()) {
-                boolean assistant = "assistant".equals(message.path("role").asText());
-                if (config.retainMessages()) {
-                    long bytes = PiCodec.jsonBytes(message);
-                    if (!withinBudget(messageBytes + bytes + (assistant ? 0 : streamedBytes))) return;
-                    messageBytes += bytes;
-                    messages.add(message.deepCopy());
-                }
-                if (assistant) {
-                    String finalText = assistantText(message);
-                    if (!withinBudget(messageBytes + (config.retainMessages() ? 0 : finalText.getBytes(StandardCharsets.UTF_8).length))) return;
-                    text = finalText;
+        switch (event.type()) {
+            case "agent_start" -> { runStarted = true; settled = false; }
+            case "message_start" -> {
+                if ("assistant".equals(event.raw().path("message").path("role").asText())) {
                     streamedBytes = 0;
-                    stopReason = message.path("stopReason").asText(null);
-                    errorMessage = message.path("errorMessage").asText(null);
-                    aborted = "aborted".equals(stopReason);
+                    if (!config.retainMessages()) text = "";
                 }
             }
+            case "message_update" -> {
+                String delta = event.textDelta().orElse(null);
+                if (delta == null) return;
+                long bytes = delta.getBytes(StandardCharsets.UTF_8).length;
+                if (withinBudget(messageBytes + streamedBytes + bytes)) streamedBytes += bytes;
+            }
+            case "message_end" -> onMessageEnd(event.raw().get("message"));
+            case "agent_settled" -> {
+                if (event.raw().path("aborted").isBoolean()) aborted = event.raw().path("aborted").booleanValue();
+                settled = true;
+                completeIfReady();
+            }
+            default -> { }
         }
-        if ("agent_settled".equals(event.type())) {
-            if (event.raw().path("aborted").isBoolean()) aborted = event.raw().path("aborted").booleanValue();
-            settled = true;
-            completeIfReady();
+    }
+
+    private void onMessageEnd(JsonNode message) {
+        if (message == null || !message.isObject()) return;
+        boolean assistant = "assistant".equals(message.path("role").asText());
+        if (config.retainMessages()) {
+            long bytes = PiCodec.jsonBytes(message);
+            if (!withinBudget(messageBytes + bytes + (assistant ? 0 : streamedBytes))) return;
+            messageBytes += bytes;
+            messages.add(message.deepCopy());
         }
+        if (!assistant) return;
+        String finalText = assistantText(message);
+        long textBytes = config.retainMessages() ? 0 : finalText.getBytes(StandardCharsets.UTF_8).length;
+        if (!withinBudget(messageBytes + textBytes)) return;
+        text = finalText;
+        streamedBytes = 0;
+        stopReason = message.path("stopReason").asText(null);
+        errorMessage = message.path("errorMessage").asText(null);
+        aborted = "aborted".equals(stopReason);
     }
 
     void fail(Throwable failure) {
         if (terminal) return;
+        owner.fail(this);
+        finishFailed(failure);
+    }
+
+    private void finishFailed(Throwable failure) {
         terminal = true;
         terminalFailure = failure;
         cancelTimeout();
@@ -199,17 +208,17 @@ public final class PiActivity {
         synchronized (owner.lifecycle) {
             if (terminal) return;
             if (failure != null) {
-                failure = PiClient.unwrap(failure);
-                if (failure instanceof RequestRejectedException) owner.release(this);
-                else owner.fail(this);
-                fail(failure);
+                failure = PiSupport.unwrap(failure);
+                if (failure instanceof RequestRejectedException) {
+                    owner.release(this);
+                    finishFailed(failure);
+                } else fail(failure);
                 return;
             }
             accepted = true;
-            if (response.data() != null) disposition = response.data().path("disposition").asText("started");
+            disposition = dispositionOf(response);
             PiThreads.callbacks().execute(() -> acceptance.complete(response));
             if ("handled".equals(disposition) && queuedControl) {
-                owner.fail(this);
                 fail(new PiException("Input was handled while control input was queued; recreate the client"));
                 return;
             }
@@ -236,7 +245,6 @@ public final class PiActivity {
         synchronized (owner.lifecycle) {
             if (terminal) return;
             if (owner.isActive(this)) stopRemoteWork();
-            owner.fail(this);
             fail(new ActivityTimeoutException(requestId));
         }
     }
@@ -248,12 +256,15 @@ public final class PiActivity {
     private boolean withinBudget(long bytes) {
         if (bytes <= config.activityResultLimit()) return true;
         stopRemoteWork();
-        owner.fail(this);
         fail(new PiException("Activity result exceeded " + config.activityResultLimit() + " bytes; recreate the client"));
         return false;
     }
 
     private void cancelTimeout() { if (timeoutTask != null) timeoutTask.cancel(false); }
+
+    private static String dispositionOf(PiResponse response) {
+        return response.data() == null ? "started" : response.data().path("disposition").asText("started");
+    }
 
     private static String assistantText(JsonNode message) {
         JsonNode content = message.get("content");

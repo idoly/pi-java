@@ -15,7 +15,6 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Flow;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
@@ -39,10 +38,8 @@ class PiProcessTest {
                 Path.of(System.getProperty("user.dir")),
                 Map.of(),
                 8,
-                16,
                 1024 * 1024,
                 2000,
-                1024 * 1024,
                 stderr::add
         );
 
@@ -95,7 +92,7 @@ class PiProcessTest {
         PiProcess process = childProcess(200, "bad-tree", pidFile.toString());
         ProcessHandle child = null;
         try {
-            process.start().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            process.start(ignored -> {}).toCompletableFuture().get(2, TimeUnit.SECONDS);
             ExecutionException failure = assertThrows(ExecutionException.class,
                     () -> process.exit().toCompletableFuture().get(3, TimeUnit.SECONDS));
             assertInstanceOf(PiException.class, failure.getCause());
@@ -116,14 +113,8 @@ class PiProcessTest {
     void closeIsBoundedWhenChildDoesNotReadStdin() throws Exception {
         PiProcess process = childProcess(200, "sleep");
         CompletableFuture<Void> ready = new CompletableFuture<>();
-        process.inbound().subscribe(new Flow.Subscriber<>() {
-            public void onSubscribe(Flow.Subscription subscription) { subscription.request(Long.MAX_VALUE); }
-            public void onNext(Object value) { ready.complete(null); }
-            public void onError(Throwable failure) { ready.completeExceptionally(failure); }
-            public void onComplete() {}
-        });
         try {
-            process.start().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            process.start(value -> ready.complete(null)).toCompletableFuture().get(2, TimeUnit.SECONDS);
             ready.get(2, TimeUnit.SECONDS);
             var write = process.send(Request.message("large", "prompt", "x".repeat(1024 * 1024), List.of())).toCompletableFuture();
             assertThrows(TimeoutException.class, () -> write.get(100, TimeUnit.MILLISECONDS));
@@ -138,7 +129,7 @@ class PiProcessTest {
         List<String> command = List.of(Path.of(System.getProperty("java.home"), "bin", executable("java")).toString(),
                 "-cp", System.getProperty("java.class.path"), PiProcessStub.class.getName(), "huge-stderr");
         PiProcess process = new PiProcess(new PiProcess.Config(command, Path.of(System.getProperty("user.dir")), Map.of(),
-                8, 64, 1024 * 1024, 1000, 1024 * 1024, lines::add));
+                8, 1024 * 1024, 1000, lines::add));
         try (PiConnection connection = new PiConnection(process, 2000, "stderr")) {
             connection.start().toCompletableFuture().get(2, TimeUnit.SECONDS);
             assertTrue(connection.request("get_state").toCompletableFuture().get(2, TimeUnit.SECONDS).success());
@@ -154,7 +145,7 @@ class PiProcessTest {
                 "-cp", System.getProperty("java.class.path"), PiProcessStub.class.getName()));
         command.addAll(List.of(arguments));
         return new PiProcess(new PiProcess.Config(command, Path.of(System.getProperty("user.dir")), Map.of(),
-                8, 64, 1024 * 1024, graceMillis, 1024 * 1024, null));
+                8, 1024 * 1024, graceMillis, null));
     }
 
     private static String executable(String name) {

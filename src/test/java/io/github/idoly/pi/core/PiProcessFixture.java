@@ -44,8 +44,7 @@ final class PiProcessFixture implements AutoCloseable {
                     System.getProperty("os.name").toLowerCase().contains("win") ? "java.exe" : "java").toString();
             process = new PiProcess(new PiProcess.Config(List.of(java, "-cp", System.getProperty("java.class.path"),
                     PiProcessStub.class.getName(), "controlled", Integer.toString(server.getLocalPort()), Boolean.toString(holdOnClose)),
-                    Path.of(System.getProperty("user.dir")), Map.of(), 256, 1024, 32 * 1024 * 1024,
-                    500, 32 * 1024 * 1024, null));
+                    Path.of(System.getProperty("user.dir")), Map.of(), 256, 32 * 1024 * 1024, 500, null));
             Thread reader = new Thread(this::readCommands, "pi-test-control");
             reader.setDaemon(true);
             reader.start();

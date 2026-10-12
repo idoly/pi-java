@@ -12,7 +12,6 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Flow;
 import java.util.concurrent.TimeUnit;
@@ -77,18 +76,17 @@ public final class PiClient implements AutoCloseable {
     /** Starts Pi using explicit settings. Tools execute in Pi, not in this SDK. */
     public static PiClient open(PiConfig config) {
         Objects.requireNonNull(config, "config");
-        PiClient client = null;
+        PiProcess process = new PiProcess(config.processConfig());
+        PiConnection connection = new PiConnection(process, TimeUnit.SECONDS.toMillis(config.requestTimeout()), UUID.randomUUID().toString());
+        connection.diagnostics(process::diagnostic);
+        PiClient client = new PiClient(connection, config, process::diagnostic);
         try {
-            PiProcess process = new PiProcess(config.processConfig());
-            PiConnection connection = new PiConnection(process, TimeUnit.SECONDS.toMillis(config.requestTimeout()), UUID.randomUUID().toString());
-            connection.diagnostics(process::diagnostic);
-            client = new PiClient(connection, config, process::diagnostic);
             client.start().toCompletableFuture().join();
             client.request("get_state").toCompletableFuture().join();
             return client;
         } catch (RuntimeException failure) {
-            if (client != null) client.close();
-            Throwable cause = unwrap(failure);
+            client.close();
+            Throwable cause = PiSupport.unwrap(failure);
             throw cause instanceof RuntimeException runtime ? runtime : new PiException("Failed to open Pi", cause);
         }
     }
@@ -104,14 +102,14 @@ public final class PiClient implements AutoCloseable {
         });
     }
 
-    public PiActivity prompt(String message) { return prompt(message, 600); }
+    public PiActivity prompt(String message) { return prompt(message, config.activityTimeout()); }
     /** Starts an activity with a positive timeout in seconds. */
     public PiActivity prompt(String message, long timeoutSeconds) { return prompt(message, List.of(), timeoutSeconds); }
 
     /** Starts an activity with images and a positive timeout in seconds. */
     public PiActivity prompt(String message, List<PiImage> images, long timeoutSeconds) {
         images = images == null ? List.of() : List.copyOf(images);
-        if (timeoutSeconds < 1) throw new IllegalArgumentException("Activity timeout must be positive seconds");
+        PiSupport.positive(timeoutSeconds, "Activity timeout seconds");
         synchronized (lifecycle) {
             if (state != State.IDLE || changingSession) {
                 throw new IllegalStateException("Prompt requires an idle session, current state is " + state);
@@ -132,7 +130,7 @@ public final class PiClient implements AutoCloseable {
     }
     /** Sends a request with a positive response timeout in seconds. */
     public CompletionStage<PiResponse> request(String command, Map<String, ?> arguments, long timeoutSeconds) {
-        if (timeoutSeconds < 1) throw new IllegalArgumentException("Response timeout must be positive seconds");
+        PiSupport.positive(timeoutSeconds, "Response timeout seconds");
         Objects.requireNonNull(command, "command");
         if (ACTIVITY_COMMANDS.contains(command)) throw new IllegalArgumentException(command + " is managed by PiActivity");
         if ("extension_ui_response".equals(command)) throw new IllegalArgumentException("Use respondToUi for extension dialogs");
@@ -148,12 +146,12 @@ public final class PiClient implements AutoCloseable {
                 result = result.whenComplete((response, failure) -> {
                     synchronized (lifecycle) {
                         changingSession = false;
-                        if (failure != null && !(unwrap(failure) instanceof RequestRejectedException)
+                        if (failure != null && !(PiSupport.unwrap(failure) instanceof RequestRejectedException)
                                 && (state == State.IDLE || state == State.ACTIVE)) state = State.FAILED;
                     }
                 });
             }
-            return external(result);
+            return PiSupport.external(result);
         }
     }
 
@@ -166,7 +164,7 @@ public final class PiClient implements AutoCloseable {
         }
         synchronized (lifecycle) {
             requireRunning();
-            return external(connection.sendUi(id, values));
+            return PiSupport.external(connection.sendUi(id, values));
         }
     }
 
@@ -187,13 +185,12 @@ public final class PiClient implements AutoCloseable {
                             changingSession = false;
                             sessionCancellation = null;
                             if (state == State.IDLE || state == State.ACTIVE) {
-                                if (failure == null) state = State.IDLE;
-                                else state = State.FAILED;
+                                state = failure == null ? State.IDLE : State.FAILED;
                             }
                         }
                         PiThreads.callbacks().execute(() -> {
                             if (failure == null) result.complete(null);
-                            else result.completeExceptionally(unwrap(failure));
+                            else result.completeExceptionally(PiSupport.unwrap(failure));
                         });
                     });
             return stage;
@@ -241,25 +238,20 @@ public final class PiClient implements AutoCloseable {
         }
     }
 
-    static <T> CompletionStage<T> external(CompletionStage<T> internal) {
-        return internal.handleAsync((value, failure) -> {
-            if (failure != null) throw new CompletionException(unwrap(failure));
-            return value;
-        }, PiThreads.callbacks());
-    }
-    static Throwable unwrap(Throwable failure) {
-        while (failure instanceof CompletionException && failure.getCause() != null) failure = failure.getCause();
-        return failure;
-    }
-
     private void onInbound(Object message) {
         if (!(message instanceof PiEvent event)) return;
         synchronized (lifecycle) {
             if (state == State.STOPPING || state == State.TERMINATED) return;
             events.publish(event);
-            if (active != null) active.onEvent(event);
-            else if ("agent_start".equals(event.type()) && state == State.IDLE) state = State.ACTIVE;
-            else if ("agent_settled".equals(event.type()) && state == State.ACTIVE) state = State.IDLE;
+            if (active != null) {
+                active.onEvent(event);
+                return;
+            }
+            switch (event.type()) {
+                case "agent_start" -> { if (state == State.IDLE) state = State.ACTIVE; }
+                case "agent_settled" -> { if (state == State.ACTIVE) state = State.IDLE; }
+                default -> { }
+            }
         }
     }
 

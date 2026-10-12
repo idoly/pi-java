@@ -44,6 +44,45 @@ class PiConfigTest {
     }
 
     @Test
+    void runtimePoliciesMapToTheirOwners() {
+        PiConfig defaults = PiConfig.builder(temp.toString()).build();
+        assertEquals(600, defaults.activityTimeout());
+        assertEquals(256, defaults.commandBufferCapacity());
+        assertEquals(3, defaults.shutdownGracePeriod());
+        PiConfig custom = PiConfig.builder(temp.toString()).activityTimeout(45)
+                .commandBufferCapacity(8).shutdownGracePeriod(0).build();
+        assertEquals(45, custom.activityTimeout());
+        assertEquals(8, custom.processConfig().commandCapacity());
+        assertEquals(0, custom.processConfig().gracePeriodMillis());
+        assertThrows(IllegalArgumentException.class, () -> PiConfig.builder().activityTimeout(0));
+        assertThrows(IllegalArgumentException.class, () -> PiConfig.builder().commandBufferCapacity(0));
+        assertThrows(IllegalArgumentException.class, () -> PiConfig.builder().shutdownGracePeriod(-1));
+    }
+
+    @Test
+    void namedOptionsCreateIndependentSnapshots() {
+        PiConfig.Builder builder = PiConfig.builder(temp.toString()).provider("first").model("initial")
+                .noSession(true).appendSystemPrompt("first appendix");
+        PiConfig first = builder.build();
+        PiConfig second = builder.provider("second").model("updated").noSession(false)
+                .appendSystemPrompt("second appendix").build();
+        assertEquals("first", first.provider().orElseThrow());
+        assertEquals("initial", first.model().orElseThrow());
+        assertTrue(first.noSession());
+        assertEquals(List.of("--provider", "first", "--model", "initial", "--no-session",
+                "--append-system-prompt", "first appendix"), first.args());
+        assertEquals("second", second.provider().orElseThrow());
+        assertEquals("updated", second.model().orElseThrow());
+        assertFalse(second.noSession());
+        assertEquals(List.of("--provider", "second", "--model", "updated", "--append-system-prompt",
+                "first appendix", "--append-system-prompt", "second appendix"), second.args());
+        var launch = second.processConfig().command();
+        assertEquals(1, launch.stream().filter("--provider"::equals).count());
+        assertEquals(1, launch.stream().filter("--model"::equals).count());
+        assertFalse(launch.contains("--no-session"));
+    }
+
+    @Test
     void rawArgsFollowPiOptionValueRules() {
         List<String> args = List.of("--system-prompt", "--help", "--append-system-prompt", "",
                 "--name", "-v", "--extension-flag=--mode");
@@ -129,8 +168,6 @@ class PiConfigTest {
         assertOption(config.command(), "--append-system-prompt", "rules.txt");
         assertOption(config.command(), "--extension-flag", "value");
         assertEquals(32 * 1024 * 1024, config.maxLineBytes());
-        assertEquals(2048, config.eventBufferCapacity());
-        assertEquals(4096, config.eventBufferLimit());
     }
 
     private static void assertOption(List<String> command, String name, String value) {

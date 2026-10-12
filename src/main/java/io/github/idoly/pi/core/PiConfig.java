@@ -10,15 +10,20 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
 /** Immutable launch and runtime configuration for one {@link PiClient}. */
 public final class PiConfig {
     /** Controls resource loading; it does not provide an operating-system sandbox. */
     public enum ResourcePolicy {
-        ISOLATED,
-        GLOBAL_ONLY,
-        TRUST_PROJECT
+        ISOLATED(List.of("--no-approve", "--no-context-files", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes")),
+        GLOBAL_ONLY(List.of("--no-approve")),
+        TRUST_PROJECT(List.of("--approve"));
+
+        private final List<String> arguments;
+
+        ResourcePolicy(List<String> arguments) { this.arguments = arguments; }
     }
 
     private final String workspace;
@@ -31,6 +36,9 @@ public final class PiConfig {
     private final int rpcLineLimit;
     private final Consumer<String> diagnostics;
     private final long requestTimeout;
+    private final long activityTimeout;
+    private final int commandBufferCapacity;
+    private final long shutdownGracePeriod;
     private final ResourcePolicy resourcePolicy;
     private final String provider;
     private final String model;
@@ -46,16 +54,19 @@ public final class PiConfig {
         builder.options.values().forEach(launchArgs::addAll);
         launchArgs.addAll(builder.args);
         args = List.copyOf(launchArgs);
-        noSession = builder.noSession;
+        noSession = builder.options.containsKey("--no-session");
         retainMessages = builder.retainMessages;
         eventBufferLimit = builder.eventBufferLimit;
         eventBufferCapacity = builder.eventBufferCapacity;
         rpcLineLimit = builder.rpcLineLimit;
         diagnostics = builder.diagnostics;
         requestTimeout = builder.requestTimeout;
+        activityTimeout = builder.activityTimeout;
+        commandBufferCapacity = builder.commandBufferCapacity;
+        shutdownGracePeriod = builder.shutdownGracePeriod;
         resourcePolicy = builder.resourcePolicy;
-        provider = builder.provider;
-        model = builder.model;
+        provider = builder.optionValue("--provider");
+        model = builder.optionValue("--model");
         environment = Map.copyOf(builder.environment);
         activityResultLimit = builder.activityResultLimit;
         codemode = builder.codemode;
@@ -99,6 +110,13 @@ public final class PiConfig {
         return requestTimeout;
     }
 
+    /** Default Activity timeout in seconds. */
+    public long activityTimeout() { return activityTimeout; }
+    /** Maximum outbound requests waiting for pipe writes. */
+    public int commandBufferCapacity() { return commandBufferCapacity; }
+    /** Graceful process shutdown wait in seconds, before forced cleanup. */
+    public long shutdownGracePeriod() { return shutdownGracePeriod; }
+
     public ResourcePolicy resourcePolicy() {
         return resourcePolicy;
     }
@@ -128,15 +146,7 @@ public final class PiConfig {
             List<String> launch = new ArrayList<>(command.isEmpty()
                     ? windows ? List.of("cmd.exe", "/d", "/s", "/c", "pi") : List.of("pi") : command);
             launch.addAll(List.of("--mode", "rpc"));
-            if (noSession) launch.add("--no-session");
-            switch (resourcePolicy) {
-                case ISOLATED -> launch.addAll(List.of("--no-approve", "--no-context-files", "--no-extensions",
-                        "--no-skills", "--no-prompt-templates", "--no-themes"));
-                case GLOBAL_ONLY -> launch.add("--no-approve");
-                case TRUST_PROJECT -> launch.add("--approve");
-            }
-            if (provider != null) launch.addAll(List.of("--provider", provider));
-            if (model != null) launch.addAll(List.of("--model", model));
+            launch.addAll(resourcePolicy.arguments);
             List<String> addedTools = new ArrayList<>();
             if (codemode) { launch.addAll(List.of("--extension", "builtin:codemode")); addedTools.add("+codemode"); }
             if (toolSearch) { launch.addAll(List.of("--extension", "builtin:tool-search")); addedTools.add("+tool_search"); }
@@ -144,8 +154,8 @@ public final class PiConfig {
             launch.addAll(args);
             Map<String, String> env = new LinkedHashMap<>(environment);
             env.put("PI_SKIP_VERSION_CHECK", "1");
-            return new PiProcess.Config(launch, directory, env, 256, eventBufferCapacity, rpcLineLimit,
-                    3000, eventBufferLimit, diagnostics);
+            return new PiProcess.Config(launch, directory, env, commandBufferCapacity, rpcLineLimit,
+                    TimeUnit.SECONDS.toMillis(shutdownGracePeriod), diagnostics);
         } catch (IOException failure) { throw new PiException("Failed to prepare Pi launch paths", failure); }
     }
 
@@ -163,16 +173,16 @@ public final class PiConfig {
         private final String workspace;
         private List<String> command = List.of();
         private List<String> args = List.of();
-        private boolean noSession;
         private boolean retainMessages;
         private int eventBufferLimit = 8 * 1024 * 1024;
         private int eventBufferCapacity = 1024;
         private int rpcLineLimit = 16 * 1024 * 1024;
         private Consumer<String> diagnostics;
         private long requestTimeout = 15;
+        private long activityTimeout = 600;
+        private int commandBufferCapacity = 256;
+        private long shutdownGracePeriod = 3;
         private ResourcePolicy resourcePolicy = ResourcePolicy.ISOLATED;
-        private String provider;
-        private String model;
         private int activityResultLimit = 16 * 1024 * 1024;
         private boolean codemode;
         private boolean toolSearch;
@@ -264,25 +274,22 @@ public final class PiConfig {
         public Builder offline(boolean enabled) { return flag("--offline", enabled); }
 
         /** Keeps the Pi session in memory when true; defaults to Pi's session persistence. */
-        public Builder noSession(boolean enabled) { noSession = enabled; return this; }
+        public Builder noSession(boolean enabled) { return flag("--no-session", enabled); }
         /** By default only final assistant output is retained; true retains this activity's messages. */
         public Builder retainMessages(boolean retain) { retainMessages = retain; return this; }
         /** UTF-8 JSON budget per event subscription and early replay, plus a count limit. */
         public Builder eventBufferLimit(int bytes) {
-            if (bytes < 1) throw new IllegalArgumentException("eventBufferLimit must be positive");
-            eventBufferLimit = bytes;
+            eventBufferLimit = PiSupport.positive(bytes, "eventBufferLimit");
             return this;
         }
-        /** Maximum queued records per event subscription and early replay; also bounds internal inbound records. */
+        /** Maximum queued records per public event subscription and early replay. */
         public Builder eventBufferCapacity(int records) {
-            if (records < 1) throw new IllegalArgumentException("eventBufferCapacity must be positive");
-            eventBufferCapacity = records;
+            eventBufferCapacity = PiSupport.positive(records, "eventBufferCapacity");
             return this;
         }
         /** Maximum single incoming JSONL record; increasing this requires enough process memory. */
         public Builder rpcLineLimit(int bytes) {
-            if (bytes < 1) throw new IllegalArgumentException("rpcLineLimit must be positive");
-            rpcLineLimit = bytes;
+            rpcLineLimit = PiSupport.positive(bytes, "rpcLineLimit");
             return this;
         }
         /** Optional bounded asynchronous diagnostic callback. May contain stderr or error text. */
@@ -293,8 +300,25 @@ public final class PiConfig {
 
         /** Sets the RPC response deadline in seconds. */
         public Builder requestTimeout(long seconds) {
-            if (seconds < 1) throw new IllegalArgumentException("requestTimeout must be positive seconds");
-            requestTimeout = seconds;
+            requestTimeout = PiSupport.positive(seconds, "requestTimeout seconds");
+            return this;
+        }
+
+        /** Sets the default Activity deadline in seconds. */
+        public Builder activityTimeout(long seconds) {
+            activityTimeout = PiSupport.positive(seconds, "activityTimeout seconds");
+            return this;
+        }
+
+        /** Sets the number of requests allowed to wait for outbound writes. */
+        public Builder commandBufferCapacity(int requests) {
+            commandBufferCapacity = PiSupport.positive(requests, "commandBufferCapacity");
+            return this;
+        }
+
+        /** Sets graceful shutdown wait in seconds; zero requests immediate forced cleanup. */
+        public Builder shutdownGracePeriod(long seconds) {
+            shutdownGracePeriod = PiSupport.nonNegative(seconds, "shutdownGracePeriod seconds");
             return this;
         }
 
@@ -304,13 +328,11 @@ public final class PiConfig {
         }
 
         public Builder provider(String provider) {
-            this.provider = requireNonBlank(provider, "provider");
-            return this;
+            return option("--provider", requireNonBlank(provider, "provider"));
         }
 
         public Builder model(String model) {
-            this.model = requireNonBlank(model, "model");
-            return this;
+            return option("--model", requireNonBlank(model, "model"));
         }
 
         /** Adds or replaces one environment variable inherited by the pi process. */
@@ -334,13 +356,17 @@ public final class PiConfig {
 
         /** Budget for retained message JSON plus the current streamed text, in UTF-8 bytes. */
         public Builder activityResultLimit(int bytes) {
-            if (bytes < 1) throw new IllegalArgumentException("activityResultLimit must be positive");
-            activityResultLimit = bytes;
+            activityResultLimit = PiSupport.positive(bytes, "activityResultLimit");
             return this;
         }
 
         public PiConfig build() {
             return new PiConfig(this);
+        }
+
+        private String optionValue(String flag) {
+            List<String> arguments = options.get(flag);
+            return arguments == null ? null : arguments.get(1);
         }
 
         private Builder option(String flag, String value) {

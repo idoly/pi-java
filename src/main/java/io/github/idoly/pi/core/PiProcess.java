@@ -27,6 +27,12 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
 final class PiProcess implements AutoCloseable {
+    private static final int DIAGNOSTIC_RECORD_LIMIT = 64;
+    private static final int DIAGNOSTIC_BYTE_LIMIT = 128 * 1024;
+    private static final int DIAGNOSTIC_TEXT_LIMIT = 4096;
+    private static final int STDERR_LINE_LIMIT = 2048;
+    private static final int STDERR_TAIL_LIMIT = 8;
+
     private enum State {
         NEW,
         RUNNING,
@@ -37,7 +43,6 @@ final class PiProcess implements AutoCloseable {
 
     private final Config options;
     private final ArrayBlockingQueue<Write> writes;
-    private final PiPublisher<Object> inbound;
     private final CompletableFuture<Integer> exit = new CompletableFuture<>();
     private final CompletableFuture<Void> stdoutDone = new CompletableFuture<>();
     private final CompletableFuture<Void> cleanupDone = new CompletableFuture<>();
@@ -55,9 +60,7 @@ final class PiProcess implements AutoCloseable {
     PiProcess(Config options) {
         this.options = Objects.requireNonNull(options, "options");
         this.writes = new ArrayBlockingQueue<>(options.commandCapacity());
-        this.inbound = new PiPublisher<>(PiThreads.executor(), options.eventBufferCapacity(),
-                Math.max(options.maxLineBytes(), options.eventBufferLimit()), PiCodec::recordBytes, this::diagnostic);
-        diagnosticEvents = new PiPublisher<>(PiThreads.executor(), 64, 128 * 1024,
+        diagnosticEvents = new PiPublisher<>(PiThreads.executor(), DIAGNOSTIC_RECORD_LIMIT, DIAGNOSTIC_BYTE_LIMIT,
                 line -> line.getBytes(StandardCharsets.UTF_8).length, ignored -> {});
         if (options.diagnostics() != null) diagnosticEvents.subscribe(new Flow.Subscriber<>() {
             public void onSubscribe(Flow.Subscription subscription) { subscription.request(Long.MAX_VALUE); }
@@ -67,9 +70,11 @@ final class PiProcess implements AutoCloseable {
         });
     }
 
-    void diagnostic(String line) { diagnosticEvents.publish(line.length() > 4096 ? line.substring(0, 4096) : line); }
+    void diagnostic(String line) {
+        diagnosticEvents.publish(line.length() > DIAGNOSTIC_TEXT_LIMIT ? line.substring(0, DIAGNOSTIC_TEXT_LIMIT) : line);
+    }
 
-    synchronized CompletionStage<Void> start() {
+    synchronized CompletionStage<Void> start(Consumer<Object> receiver) {
         if (!state.compareAndSet(State.NEW, State.RUNNING)) {
             return CompletableFuture.failedFuture(
                     new IllegalStateException("pi process can only be started once"));
@@ -82,7 +87,7 @@ final class PiProcess implements AutoCloseable {
 
             diagnostic("[process-start] pid=" + process.pid());
             writerTask = PiThreads.executor().submit(this::writeLoop);
-            stdoutTask = PiThreads.executor().submit(this::readStdout);
+            stdoutTask = PiThreads.executor().submit(() -> readStdout(receiver));
             stderrTask = PiThreads.executor().submit(this::readStderr);
             process.onExit().whenComplete(this::onExit);
             return CompletableFuture.completedFuture(null);
@@ -107,8 +112,9 @@ final class PiProcess implements AutoCloseable {
         return write.completion();
     }
 
-    Flow.Publisher<Object> inbound() {
-        return inbound;
+    /** Completes after physical exit and stdout processing; failures are propagated immediately. */
+    CompletionStage<Integer> termination() {
+        return exit.thenCompose(code -> stdoutDone.thenApply(ignored -> code));
     }
 
     CompletionStage<Integer> exit() {
@@ -141,7 +147,7 @@ final class PiProcess implements AutoCloseable {
             cancel(writerTask); // The writer closes stdin on exit; never wait for its stream lock here.
             if (current == null) {
                 state.set(State.TERMINATED);
-                inbound.complete();
+                stdoutDone.complete(null);
                 exit.complete(-1);
                 return;
             }
@@ -212,15 +218,15 @@ final class PiProcess implements AutoCloseable {
         }
     }
 
-    private void readStdout() {
+    private void readStdout(Consumer<Object> receiver) {
         PiCodec codec = new PiCodec(options.maxLineBytes());
         byte[] buffer = new byte[8192];
         try (InputStream stdout = process.getInputStream()) {
             int bytesRead;
             while ((bytesRead = stdout.read(buffer)) != -1) {
-                codec.decode(buffer, 0, bytesRead, inbound::publish);
+                codec.decode(buffer, 0, bytesRead, receiver);
             }
-            codec.finish(inbound::publish);
+            codec.finish(receiver);
         } catch (Throwable failure) {
             if (state.get() == State.RUNNING) {
                 fail(new PiException("RPC stdout reader failed", failure));
@@ -241,7 +247,7 @@ final class PiProcess implements AutoCloseable {
                     if (chunk[i] == '\n') {
                         publishStderr(line.toString() + (truncated ? " [truncated]" : ""));
                         line.setLength(0); truncated = false;
-                    } else if (line.length() < 2048) line.append(chunk[i]);
+                    } else if (line.length() < STDERR_LINE_LIMIT) line.append(chunk[i]);
                     else truncated = true;
                 }
             }
@@ -254,7 +260,7 @@ final class PiProcess implements AutoCloseable {
     private void publishStderr(String line) {
         if (line.endsWith("\r")) line = line.substring(0, line.length() - 1);
         synchronized (stderrTail) {
-            if (stderrTail.size() == 8) stderrTail.removeFirst();
+            if (stderrTail.size() == STDERR_TAIL_LIMIT) stderrTail.removeFirst();
             stderrTail.addLast(line);
         }
         diagnostic("[stderr] " + line);
@@ -270,8 +276,6 @@ final class PiProcess implements AutoCloseable {
         int exitCode = exited.exitValue();
         reportExit(exitCode);
         exit.complete(exitCode);
-        // EOF parsing and publisher draining precede the connection's terminal notification.
-        stdoutDone.whenComplete((ignored, readFailure) -> inbound.complete());
         failWrites(new PiException("pi process exited with code " + exitCode));
     }
 
@@ -285,7 +289,6 @@ final class PiProcess implements AutoCloseable {
     private void fail(PiException failure) {
         state.set(State.FAILED);
         diagnostic("[process-failed] " + failure.getMessage());
-        inbound.fail(failure);
         exit.completeExceptionally(failure);
         close();
     }
@@ -310,17 +313,15 @@ final class PiProcess implements AutoCloseable {
     }
 
     record Config(List<String> command, Path directory, Map<String, String> env,
-                  int commandCapacity, int eventBufferCapacity, int maxLineBytes,
-                  long gracePeriodMillis, int eventBufferLimit, Consumer<String> diagnostics) {
+                  int commandCapacity, int maxLineBytes, long gracePeriodMillis, Consumer<String> diagnostics) {
         Config {
             command = List.copyOf(command);
             directory = Objects.requireNonNull(directory, "directory");
             env = Map.copyOf(env);
             if (command.isEmpty()) throw new IllegalArgumentException("command must not be empty");
-            if (commandCapacity < 1 || eventBufferCapacity < 1 || maxLineBytes < 1 || eventBufferLimit < 1) {
-                throw new IllegalArgumentException("capacities must be positive");
-            }
-            if (gracePeriodMillis < 0) throw new IllegalArgumentException("Invalid gracePeriodMillis");
+            PiSupport.positive(commandCapacity, "commandCapacity");
+            PiSupport.positive(maxLineBytes, "maxLineBytes");
+            PiSupport.nonNegative(gracePeriodMillis, "gracePeriodMillis");
         }
     }
 

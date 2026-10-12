@@ -146,6 +146,15 @@ class PiConnectionTest {
     }
 
     @Test
+    void closedConnectionCannotRestart() throws Exception {
+        connection.close();
+        ExecutionException failure = assertThrows(ExecutionException.class,
+                () -> connection.start().toCompletableFuture().get(1, TimeUnit.SECONDS));
+        assertInstanceOf(IllegalStateException.class, failure.getCause());
+        assertThrows(ExecutionException.class, () -> connection.request("get_state").toCompletableFuture().get(1, TimeUnit.SECONDS));
+    }
+
+    @Test
     void repeatedCloseWaitsForTheSameProcessCleanup() throws Exception {
         connection.close(); fixture.close();
         fixture = new PiProcessFixture(true);

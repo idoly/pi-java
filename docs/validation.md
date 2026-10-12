@@ -7,7 +7,7 @@ mvn clean verify
 mvn -Dpi.test.real=true clean verify
 ```
 
-默认运行 87 个无需 Pi 的测试，跳过 20 个真实 Pi 用例。设置 pi.test.real=true 后运行全部 107 个测试，需要 PATH 中可用的 Pi。
+默认运行 90 个无需 Pi 的测试，跳过 20 个真实 Pi 用例。设置 pi.test.real=true 后运行全部 110 个测试，需要 PATH 中可用的 Pi。
 
 真实 Pi 用例通过 rpc-test-extension.ts 注册本地确定性 Provider，使用离线启动，不需要模型 API key，也不调用付费模型。测试扩展只在测试源码中。
 
@@ -15,9 +15,9 @@ mvn -Dpi.test.real=true clean verify
 
 | 测试类 | 用例数 | 主要行为 |
 |---|---:|---|
-| `PiConfigTest` | 11 | 默认值、字符串目录、秒数期限、CLI 选项映射与参数值、输入拒绝 |
+| `PiConfigTest` | 13 | 默认值、字符串目录、秒数期限、运行策略、CLI 选项映射、独立配置快照与参数更新、输入拒绝 |
 | `PiCodecTest` | 10 | JSONL 分块、Unicode、CRLF、末尾记录、frame 限制和严格 JSON |
-| `PiConnectionTest` | 10 | ID/command 关联、乱序与迟到响应、超时清理、拒绝、退出、重复关闭 |
+| `PiConnectionTest` | 11 | ID/command 关联、乱序与迟到响应、超时清理、拒绝、退出、关闭与禁止重启 |
 | `PiProcessTest` | 5 | 真实管道、末尾响应、进程树回收、阻塞 stdin 与 stderr 截断 |
 | `PiClientActivityTest` | 31 | 接受/settled 时序、handled、独立运行、控制请求、取消、期限、预算、关闭竞争 |
 | `PiClientConcurrencyTest` | 1 | 多个 Client 的结果隔离 |
@@ -35,8 +35,8 @@ PiProcessFixture 控制 PiProcessStub 子 JVM，SDK 通信通过真实 stdin/std
 
 | 环境 | JVM | Pi | 失败 / 错误 / 跳过 | 结果 |
 |---|---|---|---|---|
-| Windows | 25 | 1.1.0 | 0 / 0 / 0 | 107 tests，BUILD SUCCESS |
-| Linux/WSL | 25 | 1.1.0 | 0 / 0 / 0 | 107 tests，BUILD SUCCESS |
+| Windows | 25 | 1.1.0 | 0 / 0 / 0 | 110 tests，BUILD SUCCESS |
+| Linux/WSL | 25 | 1.1.0 | 0 / 0 / 0 | 110 tests，BUILD SUCCESS |
 
 编译目标为 Java 17，产物为 SDK、sources 和 Javadoc JAR。GitHub Actions 配置 Linux/Windows、JVM 17/25，RPC 作业测试 Pi 1.1.0 与 npm latest；本地结果不代表远端作业或 JVM 17 执行结果，latest 是兼容探测目标。
 
